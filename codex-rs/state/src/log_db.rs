@@ -30,11 +30,13 @@ use tokio::sync::oneshot;
 use tracing::Event;
 use tracing::field::Field;
 use tracing::field::Visit;
+use tracing::level_filters::LevelFilter;
 use tracing::span::Attributes;
 use tracing::span::Id;
 use tracing::span::Record;
 use tracing_subscriber::Layer;
 use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::FormattedFields;
 use tracing_subscriber::fmt::format::DefaultFields;
@@ -47,6 +49,16 @@ use crate::StateRuntime;
 const LOG_QUEUE_CAPACITY: usize = 512;
 const LOG_BATCH_SIZE: usize = 128;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+const LOG_DB_DEFAULT_LEVEL: LevelFilter = LevelFilter::INFO;
+const NOISY_LOG_TARGETS: &[&str] = &[
+    "codex_otel.log_only",
+    "codex_otel.trace_safe",
+    "hyper_util::client::legacy::client",
+    "hyper_util::client::legacy::connect::http",
+    "hyper_util::client::legacy::pool",
+    "log",
+    "opentelemetry_sdk",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogSinkQueueConfig {
@@ -98,6 +110,13 @@ pub struct LogDbLayer {
 
 pub fn start(state_db: std::sync::Arc<StateRuntime>) -> LogDbLayer {
     LogDbLayer::start(state_db)
+}
+
+pub fn default_filter() -> Targets {
+    NOISY_LOG_TARGETS.iter().fold(
+        Targets::new().with_default(LOG_DB_DEFAULT_LEVEL),
+        |targets, target| targets.with_target(*target, LevelFilter::WARN),
+    )
 }
 
 impl Clone for LogDbLayer {
