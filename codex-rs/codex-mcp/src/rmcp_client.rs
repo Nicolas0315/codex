@@ -242,6 +242,9 @@ impl AsyncManagedClient {
 
     pub(crate) async fn shutdown(&self) {
         self.cancel_token.cancel();
+        if !self.startup_complete.load(Ordering::Acquire) {
+            return;
+        }
         match self.client().await {
             Ok(client) => client.client.shutdown().await,
             Err(StartupOutcomeError::Cancelled) => {}

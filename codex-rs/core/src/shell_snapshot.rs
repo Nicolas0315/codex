@@ -151,10 +151,14 @@ impl ShellSnapshot {
 
         // Make the new snapshot.
         if let Err(err) = write_shell_snapshot(shell.shell_type, &temp_path, session_cwd).await {
-            tracing::warn!(
-                "Failed to create shell snapshot for {}: {err:?}",
-                shell.name()
-            );
+            if is_unsupported_shell_snapshot_error(&err) {
+                tracing::debug!("Shell snapshot unsupported for {}: {err:?}", shell.name());
+            } else {
+                tracing::warn!(
+                    "Failed to create shell snapshot for {}: {err:?}",
+                    shell.name()
+                );
+            }
             return Err("write_failed");
         }
         tracing::info!(
@@ -222,6 +226,14 @@ async fn write_shell_snapshot(
         .with_context(|| format!("Failed to write snapshot to {snapshot_path}"))?;
 
     Ok(())
+}
+
+fn is_unsupported_shell_snapshot_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("Shell snapshot not supported yet")
+    })
 }
 
 async fn capture_snapshot(shell: &Shell, cwd: &AbsolutePathBuf) -> Result<String> {
