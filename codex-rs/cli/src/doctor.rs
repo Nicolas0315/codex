@@ -115,6 +115,7 @@ const COLOR_ENV_VARS: &[&str] = &[
 const TERMINAL_DIMENSION_ENV_VARS: &[&str] = &["COLUMNS", "LINES"];
 const TERMINFO_ENV_VARS: &[&str] = &["TERMINFO", "TERMINFO_DIRS"];
 const LOCALE_ENV_VARS: &[&str] = &["LC_ALL", "LC_CTYPE", "LANG"];
+const LARGE_SQLITE_LOG_FILE_BYTES: u64 = 100 * 1024 * 1024;
 #[cfg(windows)]
 const NPM_COMMAND: &str = "npm.cmd";
 #[cfg(not(windows))]
@@ -360,6 +361,7 @@ async fn build_report(
                 websocket_check,
                 mcp_check,
                 sandbox_check,
+                windows_shell_check,
                 terminal_check,
                 git_check,
                 terminal_title_check,
@@ -383,6 +385,7 @@ async fn build_report(
                         sandbox_check(config, arg0_paths)
                     })
                 },
+                async { run_sync_check("Windows shell", progress.clone(), windows_shell_check) },
                 async {
                     run_sync_check("terminal", progress.clone(), || {
                         terminal_check(command.no_color)
@@ -419,6 +422,7 @@ async fn build_report(
                 websocket_check,
                 mcp_check,
                 sandbox_check,
+                windows_shell_check,
                 terminal_check,
                 git_check,
                 terminal_title_check,
@@ -1663,6 +1667,123 @@ fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> DoctorCheck
     DoctorCheck::new("sandbox.helpers", "sandbox", status, summary).details(details)
 }
 
+#[derive(Clone, Debug, Default)]
+struct WindowsShellCheckInputs {
+    pwsh_paths: Vec<PathBuf>,
+    powershell_paths: Vec<PathBuf>,
+}
+
+impl WindowsShellCheckInputs {
+    fn detect() -> Self {
+        Self {
+            pwsh_paths: find_command_paths("pwsh"),
+            powershell_paths: find_command_paths("powershell"),
+        }
+    }
+}
+
+fn windows_shell_check() -> DoctorCheck {
+    windows_shell_check_from_inputs(WindowsShellCheckInputs::detect())
+}
+
+fn windows_shell_check_from_inputs(inputs: WindowsShellCheckInputs) -> DoctorCheck {
+    let mut details = Vec::new();
+    push_command_path_details(&mut details, "pwsh", &inputs.pwsh_paths);
+    push_command_path_details(&mut details, "powershell", &inputs.powershell_paths);
+
+    let Some(first_pwsh) = inputs.pwsh_paths.first() else {
+        return DoctorCheck::new(
+            "windows.shell",
+            "sandbox",
+            CheckStatus::Ok,
+            "PowerShell 7 was not found first on PATH",
+        )
+        .details(details);
+    };
+
+    if !is_windows_apps_path(first_pwsh) {
+        return DoctorCheck::new(
+            "windows.shell",
+            "sandbox",
+            CheckStatus::Ok,
+            "PowerShell 7 resolves to a regular executable",
+        )
+        .details(details);
+    }
+
+    DoctorCheck::new(
+        "windows.shell",
+        "sandbox",
+        CheckStatus::Warning,
+        "PowerShell 7 resolves through WindowsApps - Windows sandbox may fail",
+    )
+    .details(details)
+    .issue(
+        DoctorIssue::new(
+            CheckStatus::Warning,
+            "PowerShell 7 is resolved from the WindowsApps/MSIX package path",
+        )
+        .measured(first_pwsh.display().to_string())
+        .expected(r"a regular pwsh.exe path, such as C:\Program Files\PowerShell\7\pwsh.exe")
+        .remedy(
+            r"install a non-WindowsApps PowerShell build and make its directory precede WindowsApps on PATH, then restart Codex",
+        )
+        .field("PATH"),
+    )
+    .remediation(
+        r"Install PowerShell outside WindowsApps/MSIX and make that pwsh.exe win PATH resolution before restarting Codex.",
+    )
+}
+
+fn push_command_path_details(details: &mut Vec<String>, command: &str, paths: &[PathBuf]) {
+    if paths.is_empty() {
+        details.push(format!("{command}: not found on PATH"));
+        return;
+    }
+
+    for (index, path) in paths.iter().enumerate() {
+        details.push(format!("{command}[{index}]: {}", path.display()));
+    }
+}
+
+fn find_command_paths(command: &str) -> Vec<PathBuf> {
+    let Some(path_env) = env::var_os("PATH") else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    for dir in env::split_paths(&path_env) {
+        for candidate in command_path_candidates(&dir, command) {
+            if executable_path_exists(&candidate).is_ok()
+                && !paths.iter().any(|existing| existing == &candidate)
+            {
+                paths.push(candidate);
+            }
+        }
+    }
+    paths
+}
+
+fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![dir.join(command)];
+    #[cfg(windows)]
+    {
+        let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        candidates.extend(
+            pathext
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| dir.join(format!("{command}{extension}"))),
+        );
+    }
+    candidates
+}
+
+fn is_windows_apps_path(path: &Path) -> bool {
+    let text = path.to_string_lossy().to_ascii_lowercase();
+    text.contains(r"\windowsapps\")
+}
+
 #[derive(Clone, Debug)]
 struct TerminalCheckInputs {
     info: TerminalInfo,
@@ -2134,30 +2255,92 @@ async fn state_check(config: &Config) -> DoctorCheck {
     path_readiness(&mut details, "log dir", &config.log_dir);
     path_readiness(&mut details, "sqlite home", &config.sqlite_home);
     let mut integrity_failures = Vec::new();
+    let mut issues = Vec::new();
     for db in codex_state::runtime_db_paths(&config.sqlite_home) {
         path_readiness(&mut details, db.label, &db.path);
         sqlite_integrity_detail(&mut details, &mut integrity_failures, db.label, &db.path).await;
+        if db.path.file_name().and_then(OsStr::to_str) == Some(codex_state::LOGS_DB_FILENAME) {
+            push_large_sqlite_log_issues(&mut details, &mut issues, &db.path);
+        }
     }
     rollout_stats_details(&mut details, &config.codex_home);
     standalone_release_cache_details(&mut details);
 
-    let status = if integrity_failures.is_empty() {
-        CheckStatus::Ok
-    } else {
+    let status = if !integrity_failures.is_empty() {
         CheckStatus::Fail
-    };
-    let summary = if status == CheckStatus::Ok {
-        "state paths and databases are inspectable"
+    } else if !issues.is_empty() {
+        CheckStatus::Warning
     } else {
-        "state database integrity check failed"
+        CheckStatus::Ok
+    };
+    let summary = match status {
+        CheckStatus::Ok => "state paths and databases are inspectable",
+        CheckStatus::Warning => "state paths are healthy, but diagnostic logs are large",
+        CheckStatus::Fail => "state database integrity check failed",
     };
     let mut check = DoctorCheck::new("state.paths", "state", status, summary).details(details);
+    for issue in issues {
+        check = check.issue(issue);
+    }
     if status == CheckStatus::Fail {
         check = check.remediation(
             "Move the damaged SQLite database aside, then restart the interactive CLI or app server so it can rebuild that runtime database from saved data. Other entry points may not rebuild automatically.",
         );
+    } else if status == CheckStatus::Warning {
+        check = check.remediation(
+            "Diagnostic log growth does not block state access, but large logs can slow startup and waste disk writes; rotate or prune logs after taking a backup if needed.",
+        );
     }
     check
+}
+
+fn push_large_sqlite_log_issues(
+    details: &mut Vec<String>,
+    issues: &mut Vec<DoctorIssue>,
+    logs_db_path: &Path,
+) {
+    for (label, path) in sqlite_log_file_paths(logs_db_path) {
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let size = metadata.len();
+        details.push(format!("{label} size: {}", format_bytes(size)));
+        if size > LARGE_SQLITE_LOG_FILE_BYTES {
+            issues.push(
+                DoctorIssue::new(
+                    CheckStatus::Warning,
+                    format!("{label} is larger than the recommended diagnostic log size"),
+                )
+                .measured(format_bytes(size))
+                .expected(format!("<= {}", format_bytes(LARGE_SQLITE_LOG_FILE_BYTES)))
+                .remedy("rotate or prune diagnostic logs after taking a backup")
+                .field(label),
+            );
+        }
+    }
+}
+
+fn sqlite_log_file_paths(logs_db_path: &Path) -> Vec<(String, PathBuf)> {
+    vec![
+        ("logs DB".to_string(), logs_db_path.to_path_buf()),
+        (
+            "logs DB WAL".to_string(),
+            PathBuf::from(format!("{}-wal", logs_db_path.display())),
+        ),
+        (
+            "logs DB SHM".to_string(),
+            PathBuf::from(format!("{}-shm", logs_db_path.display())),
+        ),
+    ]
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 async fn sqlite_integrity_detail(
@@ -4126,6 +4309,64 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert_eq!(check.summary, "terminal metadata was detected");
+    }
+
+    #[test]
+    fn windows_shell_check_warns_when_pwsh_resolves_to_windowsapps() {
+        let check = windows_shell_check_from_inputs(WindowsShellCheckInputs {
+            pwsh_paths: vec![
+                PathBuf::from(
+                    r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.2.0_x64__8wekyb3d8bbwe\pwsh.exe",
+                ),
+                PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            ],
+            powershell_paths: vec![PathBuf::from(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            )],
+        });
+
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert_eq!(
+            check.summary,
+            "PowerShell 7 resolves through WindowsApps - Windows sandbox may fail"
+        );
+        assert_eq!(check.issues.len(), 1);
+        assert_eq!(check.issues[0].fields, vec!["PATH".to_string()]);
+    }
+
+    #[test]
+    fn windows_shell_check_accepts_regular_pwsh() {
+        let check = windows_shell_check_from_inputs(WindowsShellCheckInputs {
+            pwsh_paths: vec![PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe")],
+            powershell_paths: Vec::new(),
+        });
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(
+            check.summary,
+            "PowerShell 7 resolves to a regular executable"
+        );
+        assert!(check.issues.is_empty());
+    }
+
+    #[test]
+    fn large_sqlite_log_issue_warns_for_oversized_logs_db() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let logs_db = tempdir.path().join("logs_2.sqlite");
+        let file = std::fs::File::create(&logs_db).expect("create logs db");
+        file.set_len(LARGE_SQLITE_LOG_FILE_BYTES + 1)
+            .expect("resize logs db");
+
+        let mut details = Vec::new();
+        let mut issues = Vec::new();
+        push_large_sqlite_log_issues(&mut details, &mut issues, &logs_db);
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].cause,
+            "logs DB is larger than the recommended diagnostic log size"
+        );
+        assert!(details.contains(&"logs DB size: 100.0 MiB".to_string()));
     }
 
     #[test]

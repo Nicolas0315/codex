@@ -361,7 +361,10 @@ fn parity_check_from_scan_and_rows(
                 missing_active.len(),
                 missing_archived.len()
             ))
-            .expected("every rollout file has a matching threads row"),
+            .expected("every rollout file has a matching threads row")
+            .remedy(
+                "Stop Codex, back up state_5.sqlite plus its WAL/SHM files, move them aside, then start Codex so startup backfill can rebuild the thread inventory from rollout files.",
+            ),
         );
     }
     if !stale_rows.is_empty() {
@@ -773,18 +776,26 @@ mod tests {
         assert_detail(&check, "rollout DB stale rows", "1");
         assert_detail(&check, "rollout DB archive mismatches", "1");
         assert_eq!(check.remediation, None);
+        assert!(check.issues.iter().any(|issue| {
+            issue.cause == "rollout files are missing from the state DB"
+                && issue.remedy.as_deref().is_some_and(|remedy| {
+                    remedy.contains("back up state_5.sqlite") && remedy.contains("startup backfill")
+                })
+        }));
         assert!(check.issues.iter().all(|issue| {
             !issue
                 .remedy
                 .as_deref()
                 .is_some_and(|remedy| remedy.starts_with("Restart Codex"))
         }));
-        assert!(
-            check
-                .details
-                .iter()
-                .any(|detail| detail.contains(missing_path.to_string_lossy().as_ref()))
-        );
+        let missing_file_name = missing_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .expect("missing rollout file name");
+        assert!(check.details.iter().any(|detail| {
+            detail.contains("rollout DB missing active sample")
+                && detail.contains(missing_file_name)
+        }));
     }
 
     struct Fixture {
