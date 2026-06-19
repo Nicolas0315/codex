@@ -12,6 +12,15 @@ use std::process::Command as StdCommand;
 
 use tempfile::tempdir;
 
+#[test]
+fn unsupported_shell_snapshot_error_is_detected() {
+    let unsupported = anyhow::anyhow!("Shell snapshot not supported yet for PowerShell");
+    let io_error = anyhow::anyhow!("permission denied");
+
+    assert!(is_unsupported_shell_snapshot_error(&unsupported));
+    assert!(!is_unsupported_shell_snapshot_error(&io_error));
+}
+
 #[cfg(unix)]
 struct BlockingStdinPipe {
     original: i32,

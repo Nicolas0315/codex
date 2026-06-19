@@ -1028,6 +1028,30 @@ async fn shutdown_cancels_pending_tool_listing() {
 }
 
 #[tokio::test]
+async fn shutdown_does_not_initialize_incomplete_client() {
+    let startup_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let startup_polled_for_future = Arc::clone(&startup_polled);
+    let pending_client = async move {
+        startup_polled_for_future.store(true, std::sync::atomic::Ordering::Release);
+        futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>().await
+    }
+    .boxed()
+    .shared();
+    let client = AsyncManagedClient {
+        client: pending_client,
+        cached_tool_info_snapshot: None,
+        cached_server_info: None,
+        startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+        cancel_token: CancellationToken::new(),
+    };
+
+    client.shutdown().await;
+
+    assert!(!startup_polled.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[tokio::test]
 async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty() {
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
