@@ -12,6 +12,8 @@ use windows_sys::Win32::Foundation::BOOL;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::ERROR_IO_PENDING;
 use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+use windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT;
 use windows_sys::Win32::Foundation::GENERIC_READ;
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -36,6 +38,7 @@ use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::System::IO::GetOverlappedResult;
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 use windows_sys::Win32::System::Threading::CreateEventW;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::OpenProcess;
@@ -60,6 +63,21 @@ impl WindowsPipeStream {
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
 
+        let handle = connect_to_pipe_before_deadline(&wide_path, deadline)?;
+
+        let handle = OwnedHandle(handle);
+        validate_pipe_server_owner(handle.raw())?;
+
+        Ok(Self { handle, deadline })
+    }
+
+    pub(super) fn set_deadline(&mut self, deadline: Instant) {
+        self.deadline = deadline;
+    }
+}
+
+fn connect_to_pipe_before_deadline(wide_path: &[u16], deadline: Instant) -> io::Result<HANDLE> {
+    loop {
         let handle = unsafe {
             CreateFileW(
                 wide_path.as_ptr(),
@@ -71,18 +89,29 @@ impl WindowsPipeStream {
                 NULL_HANDLE,
             )
         };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+        if handle != INVALID_HANDLE_VALUE {
+            return Ok(handle);
         }
 
-        let handle = OwnedHandle(handle);
-        validate_pipe_server_owner(handle.raw())?;
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
+            return Err(error);
+        }
 
-        Ok(Self { handle, deadline })
-    }
+        let timeout_ms = remaining_timeout_ms(deadline);
+        if timeout_ms == 0 {
+            return Err(timeout_io_error());
+        }
 
-    pub(super) fn set_deadline(&mut self, deadline: Instant) {
-        self.deadline = deadline;
+        if unsafe { WaitNamedPipeW(wide_path.as_ptr(), timeout_ms) } != 0 {
+            continue;
+        }
+
+        let wait_error = io::Error::last_os_error();
+        if wait_error.raw_os_error() == Some(ERROR_SEM_TIMEOUT as i32) {
+            return Err(timeout_io_error());
+        }
+        return Err(wait_error);
     }
 }
 
@@ -336,4 +365,69 @@ fn remaining_timeout_ms(deadline: Instant) -> u32 {
 
 fn timeout_io_error() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for IDE context")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+    use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
+    use windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE;
+    use windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE;
+    use windows_sys::Win32::System::Pipes::PIPE_WAIT;
+
+    const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
+
+    #[test]
+    fn connect_waits_for_busy_pipe_until_deadline() {
+        let pipe_name = unique_pipe_name();
+        let wide_path = pipe_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+
+        let server = unsafe {
+            CreateNamedPipeW(
+                wide_path.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        assert!(server != 0 && server != INVALID_HANDLE_VALUE);
+        let _server = OwnedHandle(server);
+
+        let first_client = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                NULL_HANDLE,
+            )
+        };
+        assert!(first_client != 0 && first_client != INVALID_HANDLE_VALUE);
+        let _first_client = OwnedHandle(first_client);
+
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let error = connect_to_pipe_before_deadline(&wide_path, deadline).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    fn unique_pipe_name() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        format!(r"\\.\pipe\codex-ide-test-{}-{nanos}", std::process::id())
+    }
 }
