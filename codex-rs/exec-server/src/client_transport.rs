@@ -32,6 +32,8 @@ use crate::noise_relay::noise_relay_websocket_config;
 use crate::relay::harness_connection_from_websocket;
 
 const ENVIRONMENT_CLIENT_NAME: &str = "codex-environment";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Reopens the transport for one logical exec-server client session.
 ///
@@ -349,6 +351,8 @@ fn stdio_command_process(stdio_command: &StdioExecServerCommand) -> Command {
     }
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
 }
 
