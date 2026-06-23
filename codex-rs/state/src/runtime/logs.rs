@@ -1,6 +1,9 @@
 use super::*;
 
 const LOG_RETENTION_DAYS: i64 = 10;
+#[cfg(test)]
+const LOG_STARTUP_INCREMENTAL_VACUUM_PAGES: i64 = 256;
+const LOG_STARTUP_INCREMENTAL_VACUUM_SQL: &str = "PRAGMA incremental_vacuum(256)";
 
 impl StateRuntime {
     pub async fn insert_log(&self, entry: &LogEntry) -> anyhow::Result<()> {
@@ -306,6 +309,12 @@ WHERE id IN (
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(self.logs_pool.as_ref())
             .await?;
+        // Bound startup vacuum work to avoid the latency profile of a full
+        // VACUUM while still letting auto_vacuum=INCREMENTAL reclaim pages
+        // freed by retention cleanup over successive launches.
+        sqlx::query(LOG_STARTUP_INCREMENTAL_VACUUM_SQL)
+            .execute(self.logs_pool.as_ref())
+            .await?;
         Ok(())
     }
 
@@ -540,6 +549,8 @@ fn push_like_filters(builder: &mut QueryBuilder<Sqlite>, column: &str, filters: 
 
 #[cfg(test)]
 mod tests {
+    use super::LOG_RETENTION_DAYS;
+    use super::LOG_STARTUP_INCREMENTAL_VACUUM_PAGES;
     use super::StateRuntime;
     use super::format_feedback_log_line;
     use super::test_support::unique_temp_dir;
@@ -573,6 +584,13 @@ mod tests {
             .expect("count log rows");
         pool.close().await;
         count
+    }
+
+    async fn freelist_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
+            .fetch_one(pool)
+            .await
+            .expect("read freelist count")
     }
 
     #[tokio::test]
@@ -719,6 +737,66 @@ mod tests {
             .expect("read auto_vacuum pragma");
         assert_eq!(auto_vacuum, 2);
         pool.close().await;
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn startup_maintenance_incrementally_vacuums_deleted_log_pages() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let old_ts = Utc::now()
+            .checked_sub_signed(chrono::Duration::days(LOG_RETENTION_DAYS + 1))
+            .expect("valid old timestamp")
+            .timestamp();
+        let entries: Vec<LogEntry> = (1..=1_500)
+            .map(|idx| LogEntry {
+                ts: old_ts,
+                ts_nanos: idx,
+                level: "INFO".to_string(),
+                target: "cli".to_string(),
+                message: Some("x".repeat(4 * 1024)),
+                feedback_log_body: None,
+                thread_id: Some(format!("thread-{idx}")),
+                process_uuid: Some("proc-1".to_string()),
+                file: None,
+                line: None,
+                module_path: None,
+            })
+            .collect();
+        runtime
+            .insert_logs(&entries)
+            .await
+            .expect("insert old test logs");
+
+        let deleted = runtime
+            .delete_logs_before(old_ts + 1)
+            .await
+            .expect("delete old logs");
+        assert_eq!(deleted, entries.len() as u64);
+        let freelist_before = freelist_count(runtime.logs_pool.as_ref()).await;
+        assert!(
+            freelist_before > LOG_STARTUP_INCREMENTAL_VACUUM_PAGES,
+            "test setup should leave enough free pages to prove bounded vacuum: {freelist_before}"
+        );
+
+        runtime
+            .run_logs_startup_maintenance()
+            .await
+            .expect("run startup maintenance");
+
+        let freelist_after = freelist_count(runtime.logs_pool.as_ref()).await;
+        assert!(
+            freelist_after < freelist_before,
+            "incremental vacuum should reclaim at least one free page"
+        );
+        assert!(
+            freelist_before - freelist_after <= LOG_STARTUP_INCREMENTAL_VACUUM_PAGES,
+            "startup vacuum should stay bounded"
+        );
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
