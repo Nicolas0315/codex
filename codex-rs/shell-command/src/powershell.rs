@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -7,6 +8,8 @@ use crate::shell_detect::ShellType;
 use crate::shell_detect::detect_shell_type;
 
 const POWERSHELL_FLAGS: &[&str] = &["-nologo", "-noprofile", "-command", "-c"];
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Prefixed command for powershell shell calls to request UTF-8 console output.
 pub const UTF8_OUTPUT_PREFIX: &str =
@@ -98,8 +101,10 @@ pub fn try_find_powershell_executable_blocking() -> Option<AbsolutePathBuf> {
 /// has installed pwsh.exe, it may not be available in the system PATH, in which
 /// case we attempt to locate it via other means.
 pub fn try_find_pwsh_executable_blocking() -> Option<AbsolutePathBuf> {
-    if let Some(ps_home) = std::process::Command::new("cmd")
-        .args(["/C", "pwsh", "-NoProfile", "-Command", "$PSHOME"])
+    let mut command = std::process::Command::new("cmd");
+    suppress_windows_console_window(&mut command);
+    if let Some(ps_home) = command
+        .args(pwsh_home_probe_args())
         .output()
         .ok()
         .and_then(|out| {
@@ -141,14 +146,48 @@ fn try_find_powershellish_executable_in_path(candidates: &[&str]) -> Option<Abso
     None
 }
 
-fn is_powershellish_executable_available(powershell_or_pwsh_exe: &std::path::Path) -> bool {
+fn is_powershellish_executable_available(powershell_or_pwsh_exe: &Path) -> bool {
     // This test works for both powershell.exe and pwsh.exe.
-    std::process::Command::new(powershell_or_pwsh_exe)
-        .args(["-NoLogo", "-NoProfile", "-Command", "Write-Output ok"])
+    let mut command = std::process::Command::new(powershell_or_pwsh_exe);
+    suppress_windows_console_window(&mut command);
+    command
+        .args(powershell_availability_probe_args())
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
+
+fn pwsh_home_probe_args() -> [&'static str; 7] {
+    [
+        "/D",
+        "/C",
+        "pwsh",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$PSHOME",
+    ]
+}
+
+fn powershell_availability_probe_args() -> [&'static str; 5] {
+    [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Write-Output ok",
+    ]
+}
+
+#[cfg(windows)]
+fn suppress_windows_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_windows_console_window(_command: &mut std::process::Command) {}
 
 #[cfg(test)]
 mod tests {
@@ -156,7 +195,9 @@ mod tests {
     use super::extract_powershell_command;
     #[cfg(windows)]
     use super::parse_powershell_command_into_plain_commands;
+    use super::powershell_availability_probe_args;
     use super::prefix_powershell_script_with_utf8;
+    use super::pwsh_home_probe_args;
 
     #[test]
     fn extracts_basic_powershell_command() {
@@ -234,6 +275,36 @@ mod tests {
         ];
 
         assert_eq!(prefix_powershell_script_with_utf8(&cmd), cmd);
+    }
+
+    #[test]
+    fn pwsh_home_probe_disables_cmd_autorun_and_is_noninteractive() {
+        assert_eq!(
+            pwsh_home_probe_args(),
+            [
+                "/D",
+                "/C",
+                "pwsh",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSHOME",
+            ]
+        );
+    }
+
+    #[test]
+    fn powershell_availability_probe_is_noninteractive() {
+        assert_eq!(
+            powershell_availability_probe_args(),
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Write-Output ok",
+            ]
+        );
     }
 
     #[cfg(windows)]
