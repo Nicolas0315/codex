@@ -18,6 +18,9 @@ use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 use super::compression;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 const MATCH_CONTEXT_BEFORE_CHARS: usize = 48;
 const MATCH_CONTEXT_AFTER_CHARS: usize = 96;
 
@@ -70,7 +73,8 @@ async fn ripgrep_rollout_paths(
         return Ok(Some(HashSet::new()));
     }
 
-    let output = match Command::new(rg_command)
+    let mut command = Command::new(rg_command);
+    command
         .arg("-l")
         .arg("--fixed-strings")
         .arg("--ignore-case")
@@ -79,10 +83,13 @@ async fn ripgrep_rollout_paths(
         .arg("*.jsonl")
         .arg("--")
         .arg(search_term)
-        .arg(root)
-        .output()
-        .await
+        .arg(root);
+    #[cfg(windows)]
     {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = match command.output().await {
         Ok(output) => output,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Ok(None);
