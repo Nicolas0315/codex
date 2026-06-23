@@ -7,6 +7,8 @@ use std::process::Command;
 use crate::GitToolingError;
 
 const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub(crate) fn ensure_git_repository(path: &Path) -> Result<(), GitToolingError> {
     match run_git_for_stdout(
@@ -110,7 +112,7 @@ where
         args_vec.push(OsString::from(arg.as_ref()));
     }
     let command_string = build_command_string(&args_vec);
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.current_dir(dir);
     if let Some(envs) = env {
         for (key, value) in envs {
@@ -131,6 +133,17 @@ where
         command: command_string,
         output,
     })
+}
+
+pub(crate) fn git_command() -> Command {
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn build_command_string(args: &[OsString]) -> String {

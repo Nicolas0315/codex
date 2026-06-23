@@ -13,6 +13,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::operations::git_command;
+
 /// Parameters for invoking [`apply_git_patch`].
 #[derive(Debug, Clone)]
 pub struct ApplyGitRequest {
@@ -124,7 +126,7 @@ pub fn apply_git_patch(req: &ApplyGitRequest) -> io::Result<ApplyGitResult> {
 }
 
 fn resolve_git_root(cwd: &Path) -> io::Result<PathBuf> {
-    let out = std::process::Command::new("git")
+    let out = git_command()
         .arg("rev-parse")
         .arg("--show-toplevel")
         .current_dir(cwd)
@@ -149,7 +151,7 @@ fn write_temp_patch(diff: &str) -> io::Result<(tempfile::TempDir, PathBuf)> {
 }
 
 fn run_git(cwd: &Path, git_cfg: &[String], args: &[String]) -> io::Result<(i32, String, String)> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_command();
     for p in git_cfg {
         cmd.arg(p);
     }
@@ -329,7 +331,7 @@ pub fn stage_paths(git_root: &Path, diff: &str) -> io::Result<()> {
     if existing.is_empty() {
         return Ok(());
     }
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_command();
     cmd.arg("add");
     cmd.arg("--");
     for p in &existing {
