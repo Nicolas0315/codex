@@ -40,6 +40,8 @@ use std::thread;
 use ts_rs::TS;
 
 pub(crate) const GENERATED_TS_HEADER: &str = "// GENERATED CODE! DO NOT MODIFY BY HAND!\n\n";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const IGNORED_DEFINITIONS: &[&str] = &["Option<()>"];
 const JSON_V1_ALLOWLIST: &[&str] = &["InitializeParams", "InitializeResponse"];
 const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
@@ -170,7 +172,7 @@ pub fn generate_ts_with_options(
         && let Some(prettier_bin) = prettier
         && !ts_files.is_empty()
     {
-        let status = Command::new(prettier_bin)
+        let status = no_window_command(prettier_bin)
             .arg("--write")
             .arg("--log-level")
             .arg("warn")
@@ -185,6 +187,17 @@ pub fn generate_ts_with_options(
     trim_trailing_whitespace_in_ts_files(&ts_files)?;
 
     Ok(())
+}
+
+fn no_window_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 pub fn generate_json(out_dir: &Path) -> Result<()> {
