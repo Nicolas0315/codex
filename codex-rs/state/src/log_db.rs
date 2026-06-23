@@ -387,31 +387,33 @@ async fn run_inserter(
     config: LogSinkQueueConfig,
 ) {
     let mut buffer = Vec::with_capacity(config.batch_size);
-    let mut ticker = tokio::time::interval(config.flush_interval);
-    // Consume the immediate startup tick so entries flush after the interval.
-    ticker.tick().await;
     loop {
-        tokio::select! {
-            maybe_command = receiver.recv() => {
-                match maybe_command {
-                    Some(LogDbCommand::Entry(entry)) => {
-                        buffer.push(*entry);
-                        if buffer.len() >= config.batch_size {
-                            flush(&state_db, &mut buffer).await;
-                        }
-                    }
-                    Some(LogDbCommand::Flush(reply)) => {
-                        flush(&state_db, &mut buffer).await;
-                        let _ = reply.send(());
-                    }
-                    None => {
-                        flush(&state_db, &mut buffer).await;
-                        break;
-                    }
+        let maybe_command = if buffer.is_empty() {
+            receiver.recv().await
+        } else {
+            match tokio::time::timeout(config.flush_interval, receiver.recv()).await {
+                Ok(maybe_command) => maybe_command,
+                Err(_) => {
+                    flush(&state_db, &mut buffer).await;
+                    continue;
                 }
             }
-            _ = ticker.tick() => {
+        };
+
+        match maybe_command {
+            Some(LogDbCommand::Entry(entry)) => {
+                buffer.push(*entry);
+                if buffer.len() >= config.batch_size {
+                    flush(&state_db, &mut buffer).await;
+                }
+            }
+            Some(LogDbCommand::Flush(reply)) => {
                 flush(&state_db, &mut buffer).await;
+                let _ = reply.send(());
+            }
+            None => {
+                flush(&state_db, &mut buffer).await;
+                break;
             }
         }
     }
