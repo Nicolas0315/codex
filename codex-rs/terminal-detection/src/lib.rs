@@ -3,7 +3,11 @@
 //! This module feeds terminal metadata into OpenTelemetry user-agent logging and into
 //! terminal-specific configuration choices in the TUI.
 
+use std::process::Command;
 use std::sync::OnceLock;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Structured terminal identification data.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -458,7 +462,7 @@ fn tmux_client_info() -> TmuxClientInfo {
 }
 
 fn tmux_display_message(format: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
+    let output = no_window_command("tmux")
         .args(["display-message", "-p", format])
         .output()
         .ok()?;
@@ -474,16 +478,24 @@ fn tmux_display_message(format: &str) -> Option<String> {
 fn zellij_version_from_command() -> Option<String> {
     // Best-effort fallback: missing or broken zellij binaries should not affect
     // terminal detection.
-    let output = std::process::Command::new("zellij")
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = no_window_command("zellij").arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
 
     let stdout = String::from_utf8(output.stdout).ok()?;
     parse_zellij_version(stdout.trim())
+}
+
+fn no_window_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn parse_zellij_version(value: &str) -> Option<String> {
