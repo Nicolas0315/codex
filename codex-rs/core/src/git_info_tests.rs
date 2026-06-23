@@ -436,6 +436,33 @@ async fn test_get_git_working_tree_state_with_changes() {
 }
 
 #[tokio::test]
+async fn test_get_git_working_tree_state_limits_untracked_detail() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let (repo_path, _branch) = create_test_git_repo_with_remote(&temp_dir).await;
+
+    for index in 0..35 {
+        fs::write(
+            repo_path.join(format!("untracked-{index:02}.txt")),
+            format!("new {index}"),
+        )
+        .unwrap();
+    }
+
+    let state = git_diff_to_remote(&repo_path)
+        .await
+        .expect("Should collect working tree state");
+
+    assert!(state.diff.contains("untracked-00.txt"));
+    assert!(state.diff.contains("untracked-31.txt"));
+    assert!(!state.diff.contains("untracked-32.txt"));
+    assert!(
+        state
+            .diff
+            .contains("Codex omitted detailed diffs for 3 additional untracked files")
+    );
+}
+
+#[tokio::test]
 async fn test_get_git_working_tree_state_branch_fallback() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let (repo_path, _branch) = create_test_git_repo_with_remote(&temp_dir).await;
