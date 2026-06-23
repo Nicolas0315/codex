@@ -1,4 +1,6 @@
 #[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -30,6 +32,8 @@ use tokio::io::BufWriter;
 
 pub(crate) const CHANNEL_CAPACITY: usize = 128;
 const STDIO_TERMINATION_GRACE_PERIOD: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(test)]
 pub(crate) const WEBSOCKET_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(25);
 #[cfg(not(test))]
@@ -199,7 +203,9 @@ fn kill_direct_child(child_process: &mut Child, action: &str) {
 #[cfg(windows)]
 fn kill_windows_process_tree(pid: u32) -> bool {
     let pid = pid.to_string();
-    match std::process::Command::new("taskkill")
+    let mut command = std::process::Command::new("taskkill");
+    command.creation_flags(CREATE_NO_WINDOW);
+    match command
         .args(["/PID", pid.as_str(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
