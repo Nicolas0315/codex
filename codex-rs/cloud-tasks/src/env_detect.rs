@@ -2,8 +2,12 @@ use codex_client::build_reqwest_client_with_custom_ca;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
 use std::collections::HashMap;
+use std::process::Command;
 use tracing::info;
 use tracing::warn;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct CodeEnvironment {
@@ -170,7 +174,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 
 fn get_git_origins() -> Vec<String> {
     // Prefer: git config --get-regexp remote\..*\.url
-    let out = std::process::Command::new("git")
+    let out = git_command()
         .args(["config", "--get-regexp", "remote\\..*\\.url"])
         .output();
     if let Ok(ok) = out
@@ -188,9 +192,7 @@ fn get_git_origins() -> Vec<String> {
         }
     }
     // Fallback: git remote -v
-    let out = std::process::Command::new("git")
-        .args(["remote", "-v"])
-        .output();
+    let out = git_command().args(["remote", "-v"]).output();
     if let Ok(ok) = out
         && ok.status.success()
     {
@@ -207,6 +209,17 @@ fn get_git_origins() -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn uniq(mut v: Vec<String>) -> Vec<String> {
