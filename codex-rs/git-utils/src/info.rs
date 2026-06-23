@@ -59,6 +59,7 @@ pub async fn get_git_repo_root_with_fs(
 
 /// Timeout for git commands to prevent freezing on large repositories
 const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
+const MAX_UNTRACKED_DETAILED_DIFFS: usize = 32;
 const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
@@ -766,21 +767,26 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
         if !untracked.is_empty() {
             // Use platform-appropriate null device and guard paths with `--`.
             let null_device: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
-            let futures_iter = untracked.into_iter().map(|file| async move {
-                let file_owned = file;
-                let args_vec: Vec<&str> = vec![
-                    "diff",
-                    "--no-textconv",
-                    "--no-ext-diff",
-                    "--binary",
-                    "--no-index",
-                    // -- ensures that filenames that start with - are not treated as options.
-                    "--",
-                    null_device,
-                    &file_owned,
-                ];
-                run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
-            });
+            let omitted_untracked_count =
+                untracked.len().saturating_sub(MAX_UNTRACKED_DETAILED_DIFFS);
+            let futures_iter = untracked
+                .into_iter()
+                .take(MAX_UNTRACKED_DETAILED_DIFFS)
+                .map(|file| async move {
+                    let file_owned = file;
+                    let args_vec: Vec<&str> = vec![
+                        "diff",
+                        "--no-textconv",
+                        "--no-ext-diff",
+                        "--binary",
+                        "--no-index",
+                        // -- ensures that filenames that start with - are not treated as options.
+                        "--",
+                        null_device,
+                        &file_owned,
+                    ];
+                    run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
+                });
             let results = join_all(futures_iter).await;
             for extra in results.into_iter().flatten() {
                 if extra.status.code().is_some_and(|c| c == 0 || c == 1)
@@ -788,6 +794,11 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
                 {
                     diff.push_str(&s);
                 }
+            }
+            if omitted_untracked_count > 0 {
+                diff.push_str(&format!(
+                    "\nCodex omitted detailed diffs for {omitted_untracked_count} additional untracked files to avoid spawning one Git process per file.\n"
+                ));
             }
         }
     }
