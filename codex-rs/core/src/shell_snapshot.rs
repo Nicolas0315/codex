@@ -44,6 +44,8 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 3 days retention.
 const SNAPSHOT_DIR: &str = "shell_snapshots";
 const EXCLUDED_EXPORT_VARS: &[&str] = &["PWD", "OLDPWD"];
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 impl ShellSnapshot {
     pub(crate) fn new(
@@ -286,6 +288,10 @@ async fn run_script_with_timeout(
     // Handler is kept as guard to control the drop. The `mut` pattern is required because .args()
     // returns a ref of handler.
     let mut handler = Command::new(&args[0]);
+    #[cfg(windows)]
+    {
+        handler.creation_flags(CREATE_NO_WINDOW);
+    }
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
     handler.current_dir(cwd);
