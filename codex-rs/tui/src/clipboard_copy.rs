@@ -266,11 +266,7 @@ fn wsl_clipboard_copy(text: &str) -> Result<(), String> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .args([
-            "-NoProfile",
-            "-Command",
-            "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; $text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
-        ])
+        .args(wsl_clipboard_powershell_args())
         .spawn()
         .map_err(|e| format!("failed to spawn powershell.exe: {e}"))?;
 
@@ -303,6 +299,16 @@ fn wsl_clipboard_copy(text: &str) -> Result<(), String> {
             Err(format!("powershell.exe failed: {stderr}"))
         }
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn wsl_clipboard_powershell_args() -> [&'static str; 4] {
+    [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; $text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
+    ]
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -511,6 +517,7 @@ mod tests {
     use super::osc52_sequence;
     use super::tmux_clipboard_copy_ready;
     use super::write_osc52_to_writer;
+    use super::wsl_clipboard_powershell_args;
 
     fn remote_environment() -> CopyEnvironment {
         CopyEnvironment {
@@ -905,6 +912,19 @@ mod tests {
         assert_eq!(osc_calls.get(), 0);
         assert_eq!(native_calls.get(), 1);
         assert_eq!(wsl_calls.get(), 1);
+    }
+
+    #[test]
+    fn wsl_clipboard_powershell_args_are_noninteractive() {
+        assert_eq!(
+            wsl_clipboard_powershell_args(),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; $text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
+            ]
+        );
     }
 
     #[test]
