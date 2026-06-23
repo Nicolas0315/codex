@@ -204,7 +204,7 @@ fn try_dump_windows_clipboard_image() -> Option<String> {
 
     for cmd in ["powershell.exe", "pwsh", "powershell"] {
         match std::process::Command::new(cmd)
-            .args(["-NoProfile", "-Command", script])
+            .args(windows_clipboard_powershell_args(script))
             .output()
         {
             // Executing PowerShell command
@@ -226,6 +226,11 @@ fn try_dump_windows_clipboard_image() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn windows_clipboard_powershell_args(script: &str) -> [&str; 4] {
+    ["-NoProfile", "-NonInteractive", "-Command", script]
 }
 
 #[cfg(target_os = "android")]
@@ -383,6 +388,24 @@ mod pasted_search_query_tests {
         assert_eq!(
             normalize_pasted_search_query("  alpha\n\tbeta\r\n gamma  "),
             Some(String::from("alpha beta gamma"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod wsl_clipboard_powershell_tests {
+    use super::windows_clipboard_powershell_args;
+
+    #[test]
+    fn clipboard_image_powershell_args_are_noninteractive() {
+        assert_eq!(
+            windows_clipboard_powershell_args("Write-Output ok"),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Write-Output ok"
+            ]
         );
     }
 }
