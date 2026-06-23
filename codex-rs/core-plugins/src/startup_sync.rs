@@ -6,6 +6,9 @@ use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use codex_otel::CURATED_PLUGINS_STARTUP_SYNC_FINAL_METRIC;
 use codex_otel::CURATED_PLUGINS_STARTUP_SYNC_METRIC;
 use reqwest::Client;
@@ -34,6 +37,8 @@ const CURATED_PLUGINS_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const CURATED_PLUGINS_BACKUP_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
 // Keep this comfortably above a normal sync attempt so we do not race another Codex process.
 const CURATED_PLUGINS_STALE_TEMP_DIR_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Deserialize)]
 struct GitHubRepositorySummary {
@@ -243,8 +248,7 @@ fn fetch_curated_plugins_commit_from(
 ) -> Result<(), String> {
     let fetch_refspec = format!("+{source_revision}:{CURATED_PLUGINS_FETCH_REF}");
     let output = run_git_command_with_timeout(
-        Command::new(git_binary)
-            .env("GIT_OPTIONAL_LOCKS", "0")
+        git_command(git_binary)
             .arg("-C")
             .arg(repo_path)
             .args(["fetch", "--depth", "1", "--no-tags"])
@@ -278,11 +282,7 @@ fn run_git_in_repo(
     context: &str,
 ) -> Result<(), String> {
     let output = run_git_command_with_timeout(
-        Command::new(git_binary)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .arg("-C")
-            .arg(repo_path)
-            .args(args),
+        git_command(git_binary).arg("-C").arg(repo_path).args(args),
         context,
         CURATED_PLUGINS_GIT_TIMEOUT,
     )?;
@@ -584,8 +584,7 @@ fn read_local_git_or_sha_file(
 
 fn git_ls_remote_head_sha(git_binary: &str) -> Result<String, String> {
     let output = run_git_command_with_timeout(
-        Command::new(git_binary)
-            .env("GIT_OPTIONAL_LOCKS", "0")
+        git_command(git_binary)
             .arg("ls-remote")
             .arg("https://github.com/openai/plugins.git")
             .arg("HEAD"),
@@ -610,8 +609,7 @@ fn git_ls_remote_head_sha(git_binary: &str) -> Result<String, String> {
 }
 
 fn git_head_sha(repo_path: &Path, git_binary: &str) -> Result<String, String> {
-    let output = Command::new(git_binary)
-        .env("GIT_OPTIONAL_LOCKS", "0")
+    let output = git_command(git_binary)
         .arg("-C")
         .arg(repo_path)
         .arg("rev-parse")
@@ -633,6 +631,14 @@ fn git_head_sha(repo_path: &Path, git_binary: &str) -> Result<String, String> {
         ));
     }
     Ok(sha)
+}
+
+fn git_command(git_binary: &str) -> Command {
+    let mut command = Command::new(git_binary);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn run_git_command_with_timeout(
