@@ -8,6 +8,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 fn junction_name_for_path(path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
@@ -101,6 +103,7 @@ pub fn create_cwd_junction(requested_cwd: &Path, log_dir: Option<&Path>) -> Opti
         log_dir,
     );
     let output = match std::process::Command::new("cmd")
+        .creation_flags(CREATE_NO_WINDOW)
         .raw_arg("/c")
         .raw_arg("mklink")
         .raw_arg("/J")
