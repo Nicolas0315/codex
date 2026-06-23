@@ -110,6 +110,27 @@ pub fn start(state_db: std::sync::Arc<StateRuntime>) -> LogDbLayer {
     LogDbLayer::start(state_db)
 }
 
+/// Default filter for the persistent SQLite feedback log sink.
+///
+/// Keep user-actionable Codex diagnostics at INFO+, but do not persist global
+/// TRACE/DEBUG dependency and mirrored telemetry chatter by default. The stderr
+/// and explicit telemetry layers keep their own filters.
+pub fn default_filter() -> Targets {
+    Targets::new()
+        .with_default(tracing::Level::WARN)
+        .with_target("codex_api", tracing::Level::INFO)
+        .with_target("codex_app_server", tracing::Level::INFO)
+        .with_target("codex_core", tracing::Level::INFO)
+        .with_target("codex_mcp", tracing::Level::INFO)
+        .with_target("codex_state", tracing::Level::INFO)
+        .with_target("codex_tui", tracing::Level::INFO)
+        .with_target("codex_otel.log_only", tracing::Level::WARN)
+        .with_target("codex_otel.trace_safe", tracing::Level::WARN)
+        .with_target("hyper_util", tracing::Level::WARN)
+        .with_target("log", tracing::Level::WARN)
+        .with_target("opentelemetry_sdk", tracing::Level::WARN)
+}
+
 impl Clone for LogDbLayer {
     fn clone(&self) -> Self {
         Self {
