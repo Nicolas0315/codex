@@ -7,6 +7,7 @@ use std::process::Command;
 use crate::GitToolingError;
 
 const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+const DISABLED_FSMONITOR: &str = "core.fsmonitor=false";
 
 pub(crate) fn ensure_git_repository(path: &Path) -> Result<(), GitToolingError> {
     match run_git_for_stdout(
@@ -100,18 +101,21 @@ where
 {
     let iterator = args.into_iter();
     let (lower, upper) = iterator.size_hint();
-    let mut args_vec = Vec::with_capacity(upper.unwrap_or(lower) + 2);
-    // Keep internal Git helper commands independent of configured hook directories.
+    let mut args_vec = Vec::with_capacity(upper.unwrap_or(lower) + 4);
+    // Keep internal Git helper commands independent of configured hooks and fsmonitor helpers.
     args_vec.push(OsString::from("-c"));
     args_vec.push(OsString::from(format!(
         "core.hooksPath={DISABLED_HOOKS_PATH}"
     )));
+    args_vec.push(OsString::from("-c"));
+    args_vec.push(OsString::from(DISABLED_FSMONITOR));
     for arg in iterator {
         args_vec.push(OsString::from(arg.as_ref()));
     }
     let command_string = build_command_string(&args_vec);
     let mut command = Command::new("git");
     command.current_dir(dir);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
     if let Some(envs) = env {
         for (key, value) in envs {
             command.env(key, value);
@@ -148,4 +152,24 @@ fn build_command_string(args: &[OsString]) -> String {
 struct GitRun {
     command: String,
     output: std::process::Output,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DISABLED_FSMONITOR;
+    use super::DISABLED_HOOKS_PATH;
+    use super::resolve_repository_root;
+    use crate::GitToolingError;
+
+    #[test]
+    fn git_command_errors_include_internal_safety_overrides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = resolve_repository_root(dir.path()).expect_err("not a git repository");
+        let GitToolingError::GitCommand { command, .. } = error else {
+            panic!("expected git command error");
+        };
+
+        assert!(command.contains(&format!("core.hooksPath={DISABLED_HOOKS_PATH}")));
+        assert!(command.contains(DISABLED_FSMONITOR));
+    }
 }
