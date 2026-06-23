@@ -5,15 +5,14 @@
 //! which platform it targets, and whether the search command comes from bundled
 //! package files or from PATH.
 
-use std::env;
-use std::process::Command;
-
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
+use std::env;
 
 use super::CheckStatus;
 use super::DoctorCheck;
 use super::describe_install_context;
+use super::doctor_command;
 use super::doctor_install_context;
 use super::push_path_detail;
 
@@ -80,7 +79,7 @@ pub(super) fn search_check() -> DoctorCheck {
             }
         }
     } else {
-        match Command::new(&rg_command).arg("--version").output() {
+        match doctor_command(&rg_command).arg("--version").output() {
             Ok(output) if output.status.success() => {
                 let version = String::from_utf8_lossy(&output.stdout)
                     .lines()

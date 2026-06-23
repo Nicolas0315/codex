@@ -119,6 +119,8 @@ const LOCALE_ENV_VARS: &[&str] = &["LC_ALL", "LC_CTYPE", "LANG"];
 const NPM_COMMAND: &str = "npm.cmd";
 #[cfg(not(windows))]
 const NPM_COMMAND: &str = "npm";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const REMOTE_TERMINAL_ENV_VARS: &[&str] = &[
     "SSH_TTY",
     "SSH_CONNECTION",
@@ -1056,7 +1058,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new(program)
+    let output = doctor_command(program)
         .args(args)
         .output()
         .map_err(|err| err.to_string())?;
@@ -1068,6 +1070,17 @@ where
         return Err(stderr);
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn doctor_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn config_check(config: &Config) -> DoctorCheck {
@@ -2120,7 +2133,7 @@ fn push_tmux_display_detail(details: &mut Vec<String>, label: &str, format: &str
 }
 
 fn tmux_option_value(option: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = doctor_command("tmux")
         .args(["show-options", "-gqv", option])
         .output()
         .ok()?;
@@ -2131,7 +2144,7 @@ fn tmux_option_value(option: &str) -> Option<String> {
 }
 
 fn tmux_display_message(format: &str) -> Option<String> {
-    let output = Command::new("tmux")
+    let output = doctor_command("tmux")
         .args(["display-message", "-p", format])
         .output()
         .ok()?;

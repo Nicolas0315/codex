@@ -13,6 +13,8 @@ use super::DoctorCheck;
 use super::DoctorIssue;
 
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct GitCheckInputs {
@@ -191,6 +193,8 @@ fn git_candidates() -> Vec<PathBuf> {
 
 async fn git_output(git_path: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
     let mut command = Command::new(git_path);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)
