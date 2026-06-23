@@ -6,6 +6,8 @@
 use super::*;
 
 const DESKTOP_THREAD_OPENED_MESSAGE: &str = "Opened this session in Codex Desktop.";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 impl App {
     pub(super) fn insert_history_cell(&mut self, tui: &mut tui::Tui, cell: Box<dyn HistoryCell>) {
@@ -199,8 +201,12 @@ fn open_desktop_thread_url(url: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn open_desktop_thread_url(url: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt as _;
+
     let script = windows_desktop_app_launch_script(url);
-    let output = std::process::Command::new("powershell.exe")
+    let mut command = std::process::Command::new("powershell.exe");
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
