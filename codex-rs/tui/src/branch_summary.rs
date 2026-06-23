@@ -503,7 +503,8 @@ async fn run_gh_command(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
                 .env("GH_PROMPT_DISABLED", "1")
-                .env("GIT_TERMINAL_PROMPT", "0"),
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_OPTIONAL_LOCKS", "0"),
         )
         .await
 }
@@ -639,6 +640,7 @@ mod tests {
             "Accept: application/vnd.github+json",
             "repos/openai/codex/commits/head-sha/pulls",
         ]));
+        assert!(runner.all_commands_set_optional_locks());
     }
 
     #[test]
@@ -689,7 +691,7 @@ mod tests {
 
     struct FakeRunner {
         responses: Mutex<VecDeque<FakeResponse>>,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<WorkspaceCommand>>,
     }
 
     impl FakeRunner {
@@ -706,7 +708,13 @@ mod tests {
                 .lock()
                 .expect("seen lock")
                 .iter()
-                .any(|seen| seen == &argv)
+                .any(|seen| seen.argv == argv)
+        }
+
+        fn all_commands_set_optional_locks(&self) -> bool {
+            self.seen.lock().expect("seen lock").iter().all(|command| {
+                command.env.get("GIT_OPTIONAL_LOCKS") == Some(&Some("0".to_string()))
+            })
         }
     }
 
@@ -721,10 +729,7 @@ mod tests {
                     + '_,
             >,
         > {
-            self.seen
-                .lock()
-                .expect("seen lock")
-                .push(command.argv.clone());
+            self.seen.lock().expect("seen lock").push(command.clone());
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses
