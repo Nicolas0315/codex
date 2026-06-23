@@ -34,7 +34,9 @@ struct WorkspaceFsmonitorProbeRunner<'a> {
 impl FsmonitorProbeRunner for WorkspaceFsmonitorProbeRunner<'_> {
     async fn run_probe(&mut self, args: &[&str]) -> Option<Vec<u8>> {
         let argv = ["git"].into_iter().chain(args.iter().copied());
-        let command = WorkspaceCommand::new(argv).cwd(self.cwd.to_path_buf());
+        let command = WorkspaceCommand::new(argv)
+            .cwd(self.cwd.to_path_buf())
+            .env("GIT_OPTIONAL_LOCKS", "0");
         match self.runner.run(command).await {
             Ok(output) if output.success() => Some(output.stdout.into_bytes()),
             _ => None,
@@ -241,7 +243,8 @@ async fn run_git_command(
     let mut command = WorkspaceCommand::new(argv)
         .cwd(cwd.to_path_buf())
         .timeout(DIFF_COMMAND_TIMEOUT)
-        .disable_output_cap();
+        .disable_output_cap()
+        .env("GIT_OPTIONAL_LOCKS", "0");
     if !config_overrides.is_empty() {
         command = command.env("GIT_CONFIG_COUNT", config_overrides.len().to_string());
         for (index, (key, value)) in config_overrides.iter().enumerate() {
@@ -765,6 +768,7 @@ mod tests {
 
     fn filter_override_env(driver: &str) -> HashMap<String, Option<String>> {
         HashMap::from([
+            ("GIT_OPTIONAL_LOCKS".to_string(), Some("0".to_string())),
             ("GIT_CONFIG_COUNT".to_string(), Some("3".to_string())),
             (
                 "GIT_CONFIG_KEY_0".to_string(),
@@ -782,6 +786,10 @@ mod tests {
             ),
             ("GIT_CONFIG_VALUE_2".to_string(), Some("false".to_string())),
         ])
+    }
+
+    fn optional_locks_env() -> HashMap<String, Option<String>> {
+        HashMap::from([("GIT_OPTIONAL_LOCKS".to_string(), Some("0".to_string()))])
     }
 
     fn response(argv: Vec<String>, exit_code: i32, stdout: &str) -> FakeResponse {
@@ -829,11 +837,15 @@ mod tests {
     fn assert_command_metadata(commands: &[WorkspaceCommand], cwd: &Path) {
         for command in commands {
             assert_eq!(command.cwd.as_deref(), Some(cwd));
+            assert_eq!(
+                command.env.get("GIT_OPTIONAL_LOCKS"),
+                Some(&Some("0".to_string()))
+            );
             if matches!(
                 command.argv.get(1).map(String::as_str),
                 Some("config" | "version")
             ) {
-                assert_eq!(command.env, HashMap::new());
+                assert_eq!(command.env, optional_locks_env());
                 assert_eq!(command.timeout, Duration::from_secs(/*secs*/ 5));
                 assert_eq!(command.output_bytes_cap, 64 * 1024);
                 assert_eq!(command.disable_output_cap, false);
