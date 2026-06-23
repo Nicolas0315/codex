@@ -18,6 +18,9 @@ use ts_rs::TS;
 
 use crate::GitSha;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Return `true` if the project folder specified by the `Config` is inside a
 /// Git repository.
 ///
@@ -436,6 +439,8 @@ async fn run_git_command_with_timeout_from(
     fsmonitor: crate::FsmonitorOverride,
 ) -> Option<std::process::Output> {
     let mut command = Command::new(git);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         // Keep internal Git commands independent of repository-selected hooks
