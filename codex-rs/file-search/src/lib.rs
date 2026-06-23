@@ -14,6 +14,8 @@ use nucleo::Utf32String;
 use nucleo::pattern::CaseMatching;
 use nucleo::pattern::Normalization;
 use serde::Serialize;
+#[cfg(windows)]
+use std::fs;
 use std::num::NonZero;
 use std::path::Path;
 use std::path::PathBuf;
@@ -25,6 +27,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::process::Command;
 
 #[cfg(test)]
@@ -246,13 +249,9 @@ pub async fn run_main<T: Reporter>(
                 .await?;
             #[cfg(windows)]
             {
-                Command::new("cmd")
-                    .arg("/c")
-                    .arg(search_directory)
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .status()
-                    .await?;
+                for entry in windows_directory_listing(&search_directory)? {
+                    println!("{entry}");
+                }
             }
             return Ok(());
         }
@@ -330,6 +329,22 @@ where
         Ordering::Equal => path_of(a).cmp(path_of(b)),
         other => other,
     }
+}
+
+#[cfg(windows)]
+fn windows_directory_listing(search_directory: &Path) -> anyhow::Result<Vec<String>> {
+    let mut entries = fs::read_dir(search_directory)?
+        .map(|entry| {
+            let entry = entry?;
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type()?.is_dir() {
+                name.push('\\');
+            }
+            Ok(name)
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -696,6 +711,18 @@ mod tests {
     #[test]
     fn file_name_from_path_falls_back_to_full_path() {
         assert_eq!(file_name_from_path(""), "");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_listing_lists_files_and_marks_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("alpha.txt"), "alpha").unwrap();
+        fs::create_dir(dir.path().join("beta")).unwrap();
+
+        let entries = windows_directory_listing(dir.path()).unwrap();
+
+        assert_eq!(entries, vec!["alpha.txt".to_string(), "beta\\".to_string()]);
     }
 
     #[derive(Default)]
