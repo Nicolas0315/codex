@@ -685,9 +685,10 @@ impl FileWatcher {
 
             for subscriber in state.subscribers.values_mut() {
                 let mut changed_paths = Vec::new();
-                for event_path in event_paths {
-                    for (subscriber_watch, subscriber_watch_state) in &mut subscriber.watched_paths
-                    {
+                for (subscriber_watch, subscriber_watch_state) in &mut subscriber.watched_paths {
+                    let (new_actual, _new_matched, fallback) =
+                        actual_watch_path(&subscriber_watch.requested);
+                    for event_path in event_paths {
                         if let Some(path) = changed_path_for_event(
                             subscriber_watch,
                             subscriber_watch_state,
@@ -695,16 +696,14 @@ impl FileWatcher {
                         ) {
                             changed_paths.push(path);
                         }
+                    }
 
-                        let (new_actual, _new_matched, fallback) =
-                            actual_watch_path(&subscriber_watch.requested);
-                        subscriber_watch_state.fallback |= fallback;
-                        if subscriber_watch_state.actual != new_actual {
-                            let old_actual = subscriber_watch_state.actual.clone();
-                            let count = subscriber_watch_state.count;
-                            subscriber_watch_state.actual = new_actual.clone();
-                            actual_watch_moves.push((old_actual, new_actual, count));
-                        }
+                    subscriber_watch_state.fallback |= fallback;
+                    if subscriber_watch_state.actual != new_actual {
+                        let old_actual = subscriber_watch_state.actual.clone();
+                        let count = subscriber_watch_state.count;
+                        subscriber_watch_state.actual = new_actual.clone();
+                        actual_watch_moves.push((old_actual, new_actual, count));
                     }
                 }
                 if !changed_paths.is_empty() {

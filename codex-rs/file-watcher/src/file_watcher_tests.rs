@@ -547,6 +547,37 @@ async fn missing_directory_watch_moves_to_created_directory_for_child_events() {
 }
 
 #[tokio::test]
+async fn missing_directory_watch_handles_batch_that_creates_directory_and_child() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let skills_dir = temp_dir.path().join("skills");
+    let skill_file = skills_dir.join("SKILL.md");
+
+    let watcher = Arc::new(FileWatcher::noop());
+    let (subscriber, rx) = watcher.add_subscriber();
+    let _registration = subscriber.register_path(skills_dir.clone(), /*recursive*/ false);
+    let mut rx = ThrottledWatchReceiver::new(rx, TEST_THROTTLE_INTERVAL);
+
+    std::fs::create_dir(&skills_dir).expect("create skills dir");
+    std::fs::write(&skill_file, "name: rust\n").expect("write skill file");
+    watcher
+        .send_paths_for_test(vec![temp_dir.path().into(), skill_file.clone()])
+        .await;
+
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("batched create event timeout")
+        .expect("batched create event");
+    assert_eq!(
+        event,
+        FileWatcherEvent {
+            paths: vec![skills_dir.clone(), skill_file],
+        }
+    );
+    assert_eq!(watcher.watch_counts_for_test(temp_dir.path()), None);
+    assert_eq!(watcher.watch_counts_for_test(&skills_dir), Some((1, 0)));
+}
+
+#[tokio::test]
 async fn spawn_event_loop_filters_non_mutating_events() {
     let watcher = Arc::new(FileWatcher::noop());
     let (subscriber, rx) = watcher.add_subscriber();
