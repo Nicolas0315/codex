@@ -5,6 +5,9 @@ use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub(super) fn git_remote_revision(
     source: &str,
     ref_name: Option<&str>,
@@ -135,6 +138,12 @@ fn is_full_git_sha(value: &str) -> bool {
 
 fn git_command() -> Command {
     let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");

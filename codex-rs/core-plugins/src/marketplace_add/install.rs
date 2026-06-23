@@ -4,6 +4,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub(super) fn clone_git_source(
     url: &str,
     ref_name: Option<&str>,
@@ -112,6 +115,12 @@ pub(super) fn marketplace_staging_root(install_root: &Path) -> PathBuf {
 
 fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<(), MarketplaceAddError> {
     let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command.args(args);
     command.env("GIT_TERMINAL_PROMPT", "0");
     if let Some(cwd) = cwd {
