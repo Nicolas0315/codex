@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -199,6 +201,8 @@ impl StdioServerLauncher for LocalStdioServerLauncher {
 
 #[cfg(unix)]
 const PROCESS_GROUP_TERM_GRACE_PERIOD: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[cfg(unix)]
 struct LocalProcessTerminator {
@@ -264,6 +268,8 @@ impl LocalStdioServerLauncher {
             .args(args);
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
 
         let (transport, stderr) = TokioChildProcess::builder(command)
             .stderr(Stdio::piped())
@@ -339,15 +345,17 @@ impl LocalProcessTerminator {
 
     #[cfg(windows)]
     fn terminate(&self) {
-        let _ = std::process::Command::new("taskkill")
+        let mut command = std::process::Command::new("taskkill");
+        command
             .arg("/PID")
             .arg(self.pid.to_string())
             .arg("/T")
             .arg("/F")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        command.creation_flags(CREATE_NO_WINDOW);
+        let _ = command.status();
     }
 
     #[cfg(not(any(unix, windows)))]
