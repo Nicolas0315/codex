@@ -1,4 +1,8 @@
+use std::ffi::OsStr;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
+use std::process::Command;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 
@@ -7,6 +11,8 @@ use crate::shell_detect::ShellType;
 use crate::shell_detect::detect_shell_type;
 
 const POWERSHELL_FLAGS: &[&str] = &["-nologo", "-noprofile", "-command", "-c"];
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Prefixed command for powershell shell calls to request UTF-8 console output.
 pub const UTF8_OUTPUT_PREFIX: &str =
@@ -98,7 +104,8 @@ pub fn try_find_powershell_executable_blocking() -> Option<AbsolutePathBuf> {
 /// has installed pwsh.exe, it may not be available in the system PATH, in which
 /// case we attempt to locate it via other means.
 pub fn try_find_pwsh_executable_blocking() -> Option<AbsolutePathBuf> {
-    if let Some(ps_home) = std::process::Command::new("cmd")
+    let mut ps_home_command = internal_child_command("cmd");
+    if let Some(ps_home) = ps_home_command
         .args(["/C", "pwsh", "-NoProfile", "-Command", "$PSHOME"])
         .output()
         .ok()
@@ -143,11 +150,18 @@ fn try_find_powershellish_executable_in_path(candidates: &[&str]) -> Option<Abso
 
 fn is_powershellish_executable_available(powershell_or_pwsh_exe: &std::path::Path) -> bool {
     // This test works for both powershell.exe and pwsh.exe.
-    std::process::Command::new(powershell_or_pwsh_exe)
+    internal_child_command(powershell_or_pwsh_exe)
         .args(["-NoLogo", "-NoProfile", "-Command", "Write-Output ok"])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn internal_child_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 #[cfg(test)]
