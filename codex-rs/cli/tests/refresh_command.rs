@@ -1,3 +1,5 @@
+// Avoid `update` in this integration test's filename: Windows can treat
+// matching test binaries as elevation-required installers.
 use anyhow::Result;
 use predicates::str::contains;
 use std::path::Path;

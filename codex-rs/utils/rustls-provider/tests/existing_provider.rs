@@ -1,3 +1,5 @@
+// Avoid `install` in this integration test's filename: Windows can treat
+// matching test binaries as elevation-required installers.
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 
 const EMPTY_ALGORITHMS: rustls::crypto::WebPkiSupportedAlgorithms =

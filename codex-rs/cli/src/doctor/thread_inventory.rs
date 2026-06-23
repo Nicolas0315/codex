@@ -779,12 +779,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|remedy| remedy.starts_with("Restart Codex"))
         }));
-        assert!(
-            check
-                .details
-                .iter()
-                .any(|detail| detail.contains(missing_path.to_string_lossy().as_ref()))
-        );
+        assert_path_sample(&check, "rollout DB missing active sample", &missing_path);
     }
 
     struct Fixture {
@@ -892,6 +887,16 @@ INSERT INTO threads (
             .find_map(|detail| detail.strip_prefix(&prefix))
             .expect("detail should exist");
         assert_eq!(actual, expected);
+    }
+
+    fn assert_path_sample(check: &DoctorCheck, label: &str, expected: &Path) {
+        let prefix = format!("{label}: ");
+        let actual = check
+            .details
+            .iter()
+            .find_map(|detail| detail.strip_prefix(&prefix))
+            .expect("path sample should exist");
+        assert_eq!(path_key(Path::new(actual)), path_key(expected));
     }
 
     #[test]
