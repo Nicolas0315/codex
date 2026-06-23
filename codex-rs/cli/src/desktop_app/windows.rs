@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use tokio::process::Command;
 
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CODEX_WINDOWS_INSTALLER_URL: &str =
     "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
 const CODEX_MICROSOFT_STORE_WEB_URL: &str = "https://apps.microsoft.com/detail/9plm9xgg6vks";
@@ -31,7 +32,7 @@ pub async fn run_windows_app_open_or_install(
 }
 
 async fn codex_app_is_installed() -> anyhow::Result<bool> {
-    let output = Command::new("powershell.exe")
+    let output = powershell_command()
         .arg("-NoProfile")
         .arg("-Command")
         .arg("Get-StartApps -Name 'Codex' | Select-Object -First 1 -ExpandProperty AppID")
@@ -47,7 +48,7 @@ async fn codex_app_is_installed() -> anyhow::Result<bool> {
 }
 
 async fn open_url(url: &str) -> anyhow::Result<()> {
-    let status = Command::new("powershell.exe")
+    let status = powershell_command()
         .arg("-NoProfile")
         .arg("-Command")
         .arg("& { param($target) Start-Process -FilePath $target }")
@@ -61,6 +62,12 @@ async fn open_url(url: &str) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("failed to open {url} with {status}");
     }
+}
+
+fn powershell_command() -> Command {
+    let mut command = Command::new("powershell.exe");
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn codex_new_thread_url(workspace: &str) -> String {
