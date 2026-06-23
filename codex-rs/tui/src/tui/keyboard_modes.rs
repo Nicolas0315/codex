@@ -62,12 +62,22 @@ fn running_in_wsl() -> bool {
 }
 
 pub(super) fn running_in_vscode_terminal() -> bool {
-    vscode_terminal_detected(
-        std::env::var("TERM_PROGRAM").ok().as_deref(),
-        windows_term_program().as_deref(),
-    )
+    let linux_term_program = std::env::var("TERM_PROGRAM").ok();
+    running_in_vscode_terminal_for(linux_term_program.as_deref(), windows_term_program)
 }
 
+fn running_in_vscode_terminal_for(
+    linux_term_program: Option<&str>,
+    windows_term_program_fn: impl FnOnce() -> Option<String>,
+) -> bool {
+    if term_program_is_vscode(linux_term_program) {
+        return true;
+    }
+
+    term_program_is_vscode(windows_term_program_fn().as_deref())
+}
+
+#[cfg(test)]
 fn vscode_terminal_detected(
     linux_term_program: Option<&str>,
     windows_term_program: Option<&str>,
@@ -284,11 +294,13 @@ mod tests {
     use super::ResetKeyboardEnhancementFlags;
     use super::keyboard_enhancement_disabled_for;
     use super::parse_bool_env;
+    use super::running_in_vscode_terminal_for;
     use super::tmux_session_detected;
     use super::tmux_should_enable_modify_other_keys_for;
     use super::vscode_terminal_detected;
     use crossterm::Command;
     use pretty_assertions::assert_eq;
+    use std::cell::Cell;
 
     fn ansi_for(command: impl Command) -> String {
         let mut out = String::new();
@@ -356,6 +368,32 @@ mod tests {
         assert!(!vscode_terminal_detected(
             /*linux_term_program*/ None, /*windows_term_program*/ None
         ));
+    }
+
+    #[test]
+    fn vscode_terminal_detection_skips_windows_probe_when_linux_env_matches() {
+        let windows_probe_called = Cell::new(false);
+
+        let detected = running_in_vscode_terminal_for(Some("vscode"), || {
+            windows_probe_called.set(true);
+            Some("WindowsTerminal".to_string())
+        });
+
+        assert!(detected);
+        assert!(!windows_probe_called.get());
+    }
+
+    #[test]
+    fn vscode_terminal_detection_uses_windows_probe_when_linux_env_does_not_match() {
+        let windows_probe_called = Cell::new(false);
+
+        let detected = running_in_vscode_terminal_for(Some("WindowsTerminal"), || {
+            windows_probe_called.set(true);
+            Some("vscode".to_string())
+        });
+
+        assert!(detected);
+        assert!(windows_probe_called.get());
     }
 
     #[test]
