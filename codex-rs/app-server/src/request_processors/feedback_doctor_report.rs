@@ -18,6 +18,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::warn;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 const DOCTOR_FEEDBACK_REPORT_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_DOCTOR_TAG_VALUE_LEN: usize = 256;
 
@@ -43,6 +46,10 @@ pub(crate) async fn doctor_feedback_report(config: &Config) -> Option<DoctorFeed
     let mut command = Command::new(&executable);
     command.arg("doctor").arg("--json");
     command.kill_on_drop(/*kill_on_drop*/ true);
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let output = match timeout(DOCTOR_FEEDBACK_REPORT_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => {
