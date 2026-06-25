@@ -57,6 +57,34 @@ fn environment_fallback_reads_injected_proxy_environment() {
     ));
 }
 
+#[test]
+fn websocket_urls_resolve_on_http_proxy_lanes() {
+    let route = resolve_outbound_proxy_route_for_origin(
+        "wss://chatgpt.com/backend-api/codex/responses",
+        &request_origin_for_testing("wss://chatgpt.com/backend-api/codex/responses")
+            .expect("websocket origin should parse"),
+        |lookup_url, origin| {
+            assert_eq!(
+                lookup_url,
+                "https://chatgpt.com/backend-api/codex/responses"
+            );
+            assert_eq!(origin.scheme, "https");
+            assert_eq!(origin.host, "chatgpt.com");
+            assert_eq!(origin.port, 443);
+            SystemProxyDecision::Proxy {
+                url: "http://proxy.internal:8080".to_string(),
+            }
+        },
+    );
+
+    assert_eq!(
+        route,
+        OutboundProxyRoute::Proxy {
+            url: "http://proxy.internal:8080".to_string()
+        }
+    );
+}
+
 #[tokio::test]
 async fn enabled_environment_proxy_routes_request_through_proxy() {
     let listener =

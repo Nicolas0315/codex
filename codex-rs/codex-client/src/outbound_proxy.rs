@@ -95,6 +95,18 @@ impl OutboundProxyConfig {
     }
 }
 
+/// Resolved route policy for non-reqwest clients.
+///
+/// `Default` means the caller should keep its native/default proxy behavior. For WebSocket
+/// clients in this repo that currently means tungstenite's environment proxy handling. `Direct`
+/// intentionally bypasses default proxy handling because the platform resolver selected DIRECT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboundProxyRoute {
+    Default,
+    Direct,
+    Proxy { url: String },
+}
+
 /// Error while building a resolver-aware reqwest client.
 #[derive(Debug, Error)]
 pub enum BuildRouteAwareHttpClientError {
@@ -137,6 +149,25 @@ pub fn build_reqwest_client_for_route(
     build_reqwest_client_with_custom_ca(builder).map_err(Into::into)
 }
 
+/// Resolves the outbound route for clients that cannot delegate proxy selection to reqwest.
+///
+/// WebSocket URLs are normalized to the HTTP/HTTPS proxy lane before consulting platform proxy
+/// APIs so `wss://...` follows the same proxy as `https://...`.
+pub fn resolve_outbound_proxy_route(
+    request_url: &str,
+    config: Option<&OutboundProxyConfig>,
+) -> OutboundProxyRoute {
+    let Some(_config) = config else {
+        return OutboundProxyRoute::Default;
+    };
+
+    let Some(origin) = RequestOrigin::parse(request_url) else {
+        return OutboundProxyRoute::Direct;
+    };
+
+    resolve_outbound_proxy_route_for_origin(request_url, &origin, resolve_system_proxy)
+}
+
 fn configure_proxy_for_route(
     env: &dyn EnvSource,
     builder: reqwest::ClientBuilder,
@@ -154,14 +185,27 @@ fn configure_proxy_for_route(
         return configure_env_proxy_handling(env, builder, /*origin*/ None, route_class);
     };
 
-    match resolve_system_proxy(request_url, origin) {
-        SystemProxyDecision::Direct => Ok(builder.no_proxy()),
-        SystemProxyDecision::Proxy { url } => {
+    match resolve_outbound_proxy_route_for_origin(request_url, origin, resolve_system_proxy) {
+        OutboundProxyRoute::Direct => Ok(builder.no_proxy()),
+        OutboundProxyRoute::Proxy { url } => {
             configure_concrete_proxy(builder, route_class, &url, /*no_proxy*/ None)
         }
-        SystemProxyDecision::Unavailable { .. } => {
+        OutboundProxyRoute::Default => {
             configure_env_proxy_handling(env, builder, Some(origin), route_class)
         }
+    }
+}
+
+fn resolve_outbound_proxy_route_for_origin(
+    request_url: &str,
+    origin: &RequestOrigin,
+    resolve_system_proxy: impl FnOnce(&str, &RequestOrigin) -> SystemProxyDecision,
+) -> OutboundProxyRoute {
+    let system_proxy_url = system_proxy_lookup_url(request_url);
+    match resolve_system_proxy(&system_proxy_url, origin) {
+        SystemProxyDecision::Direct => OutboundProxyRoute::Direct,
+        SystemProxyDecision::Proxy { url } => OutboundProxyRoute::Proxy { url },
+        SystemProxyDecision::Unavailable { .. } => OutboundProxyRoute::Default,
     }
 }
 
@@ -216,15 +260,41 @@ struct RequestOrigin {
 impl RequestOrigin {
     fn parse(request_url: &str) -> Option<Self> {
         let uri = request_url.parse::<http::Uri>().ok()?;
-        let scheme = uri.scheme_str()?.to_ascii_lowercase();
+        let request_scheme = uri.scheme_str()?.to_ascii_lowercase();
+        let scheme = proxy_lane_scheme(&request_scheme)?.to_string();
         let host = uri.host()?.trim_matches(['[', ']']).to_ascii_lowercase();
-        let port = uri.port_u16().or(match scheme.as_str() {
-            "http" => Some(80),
-            "https" => Some(443),
+        let port = uri.port_u16().or(match request_scheme.as_str() {
+            "ws" | "http" => Some(80),
+            "wss" | "https" => Some(443),
             _ => None,
         })?;
         Some(Self { scheme, host, port })
     }
+}
+
+fn proxy_lane_scheme(request_scheme: &str) -> Option<&'static str> {
+    match request_scheme {
+        "ws" | "http" => Some("http"),
+        "wss" | "https" => Some("https"),
+        _ => None,
+    }
+}
+
+fn system_proxy_lookup_url(request_url: &str) -> String {
+    let Some((scheme, rest)) = request_url.split_once("://") else {
+        return request_url.to_string();
+    };
+
+    match scheme.to_ascii_lowercase().as_str() {
+        "ws" => format!("http://{rest}"),
+        "wss" => format!("https://{rest}"),
+        _ => request_url.to_string(),
+    }
+}
+
+#[cfg(test)]
+fn request_origin_for_testing(request_url: &str) -> Option<RequestOrigin> {
+    RequestOrigin::parse(request_url)
 }
 
 #[cfg_attr(
