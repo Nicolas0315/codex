@@ -400,6 +400,14 @@ pub(crate) enum ValidatedUnixSocketPath {
 
 impl ValidatedUnixSocketPath {
     pub(crate) fn parse(socket_path: &str) -> Result<Self> {
+        if is_home_relative_path(socket_path) {
+            let path =
+                AbsolutePathBuf::from_absolute_path_checked(socket_path).with_context(|| {
+                    format!("failed to expand home-relative unix socket path {socket_path:?}")
+                })?;
+            return Ok(Self::Native(path));
+        }
+
         let path = Path::new(socket_path);
         if path.is_absolute() {
             let path = AbsolutePathBuf::from_absolute_path(path)
@@ -413,6 +421,10 @@ impl ValidatedUnixSocketPath {
 
         bail!("expected an absolute path, got {socket_path:?}");
     }
+}
+
+fn is_home_relative_path(path: &str) -> bool {
+    path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with(r"~\"))
 }
 
 pub(crate) fn validate_unix_socket_allowlist_paths(cfg: &NetworkProxyConfig) -> Result<()> {
@@ -876,6 +888,41 @@ mod tests {
         assert!(
             err.to_string().contains("network.allow_unix_sockets[0]"),
             "error should point at the invalid allow_unix_sockets entry: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_rejects_tilde_user_allow_unix_sockets_entries() {
+        let cfg = NetworkProxyConfig {
+            network: settings_with_unix_sockets(&["~other/.gnupg/S.gpg-agent"]),
+        };
+
+        assert!(
+            resolve_runtime(&cfg).is_err(),
+            "~user expansion is intentionally not supported for allow_unix_sockets"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_accepts_home_relative_allow_unix_sockets_entries() {
+        let cfg = NetworkProxyConfig {
+            network: settings_with_unix_sockets(&["~/.gnupg/S.gpg-agent"]),
+        };
+
+        assert!(
+            resolve_runtime(&cfg).is_ok(),
+            "leading-tilde allow_unix_sockets entry should be expanded and accepted"
+        );
+    }
+
+    #[test]
+    fn validated_unix_socket_path_expands_home_relative_entries() {
+        let path = ValidatedUnixSocketPath::parse("~/.gnupg/S.gpg-agent")
+            .expect("leading-tilde unix socket path should parse");
+
+        assert!(
+            matches!(path, ValidatedUnixSocketPath::Native(_)),
+            "home-relative unix socket path should become a native absolute path"
         );
     }
 

@@ -2008,6 +2008,28 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn unix_socket_allowlist_expands_home_relative_entries() {
+        let allowed_path = "~/.codex-test.sock";
+        let requested_path = match ValidatedUnixSocketPath::parse(allowed_path).unwrap() {
+            ValidatedUnixSocketPath::Native(path) => path.to_string_lossy().into_owned(),
+            ValidatedUnixSocketPath::UnixStyleAbsolute(_) => {
+                panic!("home-relative path should expand to a native absolute path")
+            }
+        };
+        let state = network_proxy_state_for_policy(network_settings_with_unix_sockets(
+            &["example.com"],
+            &[],
+            &[allowed_path.to_string()],
+        ));
+
+        assert!(
+            state.is_unix_socket_allowed(&requested_path).await.unwrap(),
+            "expanded absolute socket path should match the home-relative allowlist entry"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn unix_socket_allowlist_resolves_symlinks() {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
