@@ -2200,6 +2200,7 @@ async fn websocket_harness_with_provider_options(
         runtime_metrics_enabled,
         /*beta_features_header*/ None,
         /*item_ids_enabled*/ config.features.enabled(Feature::ItemIds),
+        config.respect_system_proxy,
         /*attestation_provider*/ None,
     );
 

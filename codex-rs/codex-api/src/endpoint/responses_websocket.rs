@@ -10,8 +10,11 @@ use crate::safety_buffering::treatment_from_headers;
 use crate::sse::ResponsesStreamEvent;
 use crate::sse::process_responses_event;
 use crate::telemetry::WebsocketTelemetry;
+use codex_client::OutboundProxyConfig;
+use codex_client::OutboundProxyRoute;
 use codex_client::TransportError;
 use codex_client::maybe_build_rustls_client_config_with_custom_ca;
+use codex_client::resolve_outbound_proxy_route;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -32,10 +35,14 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::client_async_tls_with_config;
 use tokio_tungstenite::connect_async_tls_with_config;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::UrlError;
+use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Response as WsResponse;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tracing::Instrument;
 use tracing::Span;
@@ -47,6 +54,7 @@ use tracing::trace;
 use tungstenite::extensions::ExtensionsConfig;
 use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
+use tungstenite::proxy::ProxyConfig;
 use url::Url;
 
 struct WsStream {
@@ -293,6 +301,7 @@ impl ResponsesWebsocketConnection {
 pub struct ResponsesWebsocketClient {
     provider: Provider,
     auth: SharedAuthProvider,
+    proxy_config: Option<OutboundProxyConfig>,
 }
 
 /// Close frame information captured by a handshake probe.
@@ -324,7 +333,18 @@ pub struct ResponsesWebsocketProbe {
 impl ResponsesWebsocketClient {
     /// Creates a Responses WebSocket client for an already-resolved provider and auth source.
     pub fn new(provider: Provider, auth: SharedAuthProvider) -> Self {
-        Self { provider, auth }
+        Self {
+            provider,
+            auth,
+            proxy_config: None,
+        }
+    }
+
+    /// Enables route-aware system proxy handling for WebSocket connections.
+    pub fn with_respect_system_proxy(mut self, respect_system_proxy: bool) -> Self {
+        self.proxy_config =
+            respect_system_proxy.then_some(OutboundProxyConfig::respect_system_proxy());
+        self
     }
 
     #[instrument(
@@ -350,7 +370,13 @@ impl ResponsesWebsocketClient {
         self.auth.add_auth_headers(&mut headers);
 
         let (stream, _status, server_reasoning_included, models_etag, server_model) =
-            connect_websocket(ws_url, headers, turn_state.clone()).await?;
+            connect_websocket_with_proxy_config(
+                ws_url,
+                headers,
+                turn_state.clone(),
+                self.proxy_config.as_ref(),
+            )
+            .await?;
         Ok(ResponsesWebsocketConnection::new(
             stream,
             self.provider.stream_idle_timeout,
@@ -384,7 +410,13 @@ impl ResponsesWebsocketClient {
         self.auth.add_auth_headers(&mut headers);
 
         let (mut stream, status, reasoning_included, models_etag, server_model) =
-            connect_websocket(ws_url.clone(), headers, /*turn_state*/ None).await?;
+            connect_websocket_with_proxy_config(
+                ws_url.clone(),
+                headers,
+                /*turn_state*/ None,
+                self.proxy_config.as_ref(),
+            )
+            .await?;
         let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
             .await
             .ok()
@@ -435,10 +467,11 @@ fn merge_request_headers(
     headers
 }
 
-async fn connect_websocket(
+async fn connect_websocket_with_proxy_config(
     url: Url,
     headers: HeaderMap,
     turn_state: Option<Arc<OnceLock<String>>>,
+    proxy_config: Option<&OutboundProxyConfig>,
 ) -> Result<(WsStream, StatusCode, bool, Option<String>, Option<String>), ApiError> {
     ensure_rustls_crypto_provider();
     info!("connecting to websocket: {url}");
@@ -456,11 +489,13 @@ async fn connect_websocket(
         .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?
         .map(tokio_tungstenite::Connector::Rustls);
 
-    let response = connect_async_tls_with_config(
+    let proxy_route = resolve_outbound_proxy_route(url.as_str(), proxy_config);
+    let response = connect_websocket_with_route(
         request,
+        &url,
         Some(websocket_config()),
-        false, // `false` means "do not disable Nagle", which is tungstenite's recommended default.
         connector,
+        proxy_route,
     )
     .await;
 
@@ -504,6 +539,57 @@ async fn connect_websocket(
         models_etag,
         server_model,
     ))
+}
+
+async fn connect_websocket_with_route(
+    request: WsRequest,
+    url: &Url,
+    config: Option<WebSocketConfig>,
+    connector: Option<tokio_tungstenite::Connector>,
+    proxy_route: OutboundProxyRoute,
+) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, WsResponse), WsError> {
+    match proxy_route {
+        OutboundProxyRoute::Default => {
+            connect_async_tls_with_config(
+                request, config,
+                false, // `false` means "do not disable Nagle", which is tungstenite's recommended default.
+                connector,
+            )
+            .await
+        }
+        OutboundProxyRoute::Direct => {
+            let (host, port) = websocket_host_port(url)?;
+            let socket = TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(WsError::Io)?;
+            client_async_tls_with_config(request, socket, config, connector).await
+        }
+        OutboundProxyRoute::Proxy { url: proxy_url } => {
+            let proxy = ProxyConfig::parse(&proxy_url).map_err(|_| {
+                WsError::Url(UrlError::InvalidProxyConfig(
+                    "resolved websocket proxy".to_string(),
+                ))
+            })?;
+            let (host, port) = websocket_host_port(url)?;
+            let socket = TcpStream::connect(proxy.authority())
+                .await
+                .map_err(WsError::Io)?;
+            let socket =
+                tokio_tungstenite::proxy::connect_via_proxy(socket, &proxy, &host, port).await?;
+            client_async_tls_with_config(request, socket, config, connector).await
+        }
+    }
+}
+
+fn websocket_host_port(url: &Url) -> Result<(String, u16), WsError> {
+    let host = url
+        .host_str()
+        .ok_or(WsError::Url(UrlError::NoHostName))?
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .ok_or(WsError::Url(UrlError::UnsupportedUrlScheme))?;
+    Ok((host, port))
 }
 
 fn websocket_config() -> WebSocketConfig {
@@ -822,6 +908,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::collections::HashMap;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
 
     #[test]
     fn direct_serialization_preserves_websocket_request_payload() {
@@ -872,6 +961,72 @@ mod tests {
     fn websocket_config_enables_permessage_deflate() {
         let config = websocket_config();
         assert!(config.extensions.permessage_deflate.is_some());
+    }
+
+    #[tokio::test]
+    async fn connect_websocket_can_use_explicit_proxy_route() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("proxy listener should bind");
+        let proxy_url = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("proxy listener should have address")
+        );
+        let proxy_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("proxy should accept");
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0_u8; 256];
+            loop {
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("proxy should read CONNECT");
+                assert!(read > 0, "proxy CONNECT should not close early");
+                request_bytes.extend_from_slice(&chunk[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let connect_request = String::from_utf8_lossy(&request_bytes).into_owned();
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .expect("proxy should accept tunnel");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake should complete through proxy");
+            websocket
+                .close(None)
+                .await
+                .expect("proxy websocket should close");
+            connect_request
+        });
+
+        let url = Url::parse("ws://example.test/backend-api/codex/responses")
+            .expect("test websocket URL should parse");
+        let request = url
+            .as_str()
+            .into_client_request()
+            .expect("test websocket request should build");
+        let (stream, response) = connect_websocket_with_route(
+            request,
+            &url,
+            None,
+            None,
+            OutboundProxyRoute::Proxy { url: proxy_url },
+        )
+        .await
+        .expect("websocket should connect through proxy route");
+        drop(stream);
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        let connect_request = proxy_task.await.expect("proxy task should complete");
+        assert!(
+            connect_request.starts_with("CONNECT example.test:80 HTTP/1.1"),
+            "unexpected CONNECT request: {connect_request}"
+        );
     }
 
     #[test]
