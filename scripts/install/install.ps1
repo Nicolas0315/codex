@@ -119,9 +119,30 @@ function Test-ArchiveDigest {
         [string]$ExpectedDigest
     )
 
-    $actualDigest = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualDigest = Get-Sha256Digest -Path $ArchivePath
     if ($actualDigest -ne $ExpectedDigest) {
         throw "Downloaded Codex archive checksum did not match expected digest. Expected $ExpectedDigest but got $actualDigest."
+    }
+}
+
+function Get-Sha256Digest {
+    param(
+        [string]$Path
+    )
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return -join ($hashBytes | ForEach-Object { $_.ToString("x2") })
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
     }
 }
 
