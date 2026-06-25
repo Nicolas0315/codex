@@ -75,6 +75,41 @@ fn parses_config_isolation_flags() {
 }
 
 #[test]
+fn exec_image_preserves_positional_prompt() {
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "--image",
+        "screenshot.png",
+        "describe this image",
+    ]);
+
+    assert_eq!(cli.images, vec![PathBuf::from("screenshot.png")]);
+    assert_eq!(cli.prompt.as_deref(), Some("describe this image"));
+}
+
+#[test]
+fn exec_image_accepts_repeated_and_comma_delimited_values() {
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "--image",
+        "a.png,b.png",
+        "--image",
+        "c.png",
+        "describe these images",
+    ]);
+
+    assert_eq!(
+        cli.images,
+        vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+            PathBuf::from("c.png"),
+        ]
+    );
+    assert_eq!(cli.prompt.as_deref(), Some("describe these images"));
+}
+
+#[test]
 fn removed_full_auto_flag_reports_migration_path() {
     let cli = Cli::parse_from(["codex-exec", "--full-auto", "summarize"]);
 

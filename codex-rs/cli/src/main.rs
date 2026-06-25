@@ -3099,6 +3099,24 @@ mod tests {
     }
 
     #[test]
+    fn exec_image_preserves_prompt_at_top_level() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "exec",
+            "--image",
+            "screenshot.png",
+            "describe this image",
+        ])
+        .expect("exec should parse image plus prompt");
+        let Some(Subcommand::Exec(exec)) = cli.subcommand else {
+            panic!("expected exec subcommand");
+        };
+
+        assert_eq!(exec.images, vec![PathBuf::from("screenshot.png")]);
+        assert_eq!(exec.prompt.as_deref(), Some("describe this image"));
+    }
+
+    #[test]
     fn sandbox_full_auto_no_longer_parses() {
         let result = MultitoolCli::try_parse_from(["codex", "sandbox", "--full-auto", "--"]);
 

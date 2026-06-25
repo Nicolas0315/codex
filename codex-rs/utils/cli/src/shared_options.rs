@@ -13,7 +13,7 @@ pub struct SharedCliOptions {
         short = 'i',
         value_name = "FILE",
         value_delimiter = ',',
-        num_args = 1..
+        num_args = 1
     )]
     pub images: Vec<PathBuf>,
 
