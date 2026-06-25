@@ -59,6 +59,7 @@ pub(crate) struct StopOutput {
     pub should_block: bool,
     pub reason: Option<String>,
     pub invalid_block_reason: Option<String>,
+    pub additional_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,20 +283,28 @@ pub(crate) fn parse_user_prompt_submit(stdout: &str) -> Option<UserPromptSubmitO
 
 pub(crate) fn parse_stop(stdout: &str) -> Option<StopOutput> {
     let wire: StopCommandOutputWire = parse_json(stdout)?;
+    let additional_context = wire
+        .hook_specific_output
+        .and_then(|output| output.additional_context);
     Some(stop_output(
         wire.universal,
         wire.decision,
         wire.reason,
+        additional_context,
         "Stop",
     ))
 }
 
 pub(crate) fn parse_subagent_stop(stdout: &str) -> Option<StopOutput> {
     let wire: SubagentStopCommandOutputWire = parse_json(stdout)?;
+    let additional_context = wire
+        .hook_specific_output
+        .and_then(|output| output.additional_context);
     Some(stop_output(
         wire.universal,
         wire.decision,
         wire.reason,
+        additional_context,
         "SubagentStop",
     ))
 }
@@ -304,6 +313,7 @@ fn stop_output(
     universal: HookUniversalOutputWire,
     decision: Option<BlockDecisionWire>,
     reason: Option<String>,
+    additional_context: Option<String>,
     event_name: &str,
 ) -> StopOutput {
     let should_block = matches!(decision, Some(BlockDecisionWire::Block));
@@ -321,6 +331,7 @@ fn stop_output(
         should_block: should_block && invalid_block_reason.is_none(),
         reason,
         invalid_block_reason,
+        additional_context,
     }
 }
 

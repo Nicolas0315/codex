@@ -456,6 +456,8 @@ pub(crate) struct StopCommandOutputWire {
     /// semantic rule during output parsing rather than in the JSON schema.
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub hook_specific_output: Option<StopHookSpecificOutputWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -471,6 +473,28 @@ pub(crate) struct SubagentStopCommandOutputWire {
     /// semantic rule during output parsing rather than in the JSON schema.
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub hook_specific_output: Option<SubagentStopHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StopHookSpecificOutputWire {
+    #[schemars(schema_with = "stop_hook_event_name_schema")]
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubagentStopHookSpecificOutputWire {
+    #[schemars(schema_with = "subagent_stop_hook_event_name_schema")]
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -849,10 +873,12 @@ mod tests {
     use super::SUBAGENT_STOP_OUTPUT_FIXTURE;
     use super::SessionStartCommandOutputWire;
     use super::StopCommandInput;
+    use super::StopCommandOutputWire;
     use super::SubagentCommandInputFields;
     use super::SubagentStartCommandInput;
     use super::SubagentStartCommandOutputWire;
     use super::SubagentStopCommandInput;
+    use super::SubagentStopCommandOutputWire;
     use super::USER_PROMPT_SUBMIT_INPUT_FIXTURE;
     use super::USER_PROMPT_SUBMIT_OUTPUT_FIXTURE;
     use super::UserPromptSubmitCommandInput;
@@ -1011,6 +1037,14 @@ mod tests {
         assert_output_hook_event_name_const::<UserPromptSubmitCommandOutputWire>(
             "UserPromptSubmitHookSpecificOutputWire",
             "UserPromptSubmit",
+        );
+        assert_output_hook_event_name_const::<StopCommandOutputWire>(
+            "StopHookSpecificOutputWire",
+            "Stop",
+        );
+        assert_output_hook_event_name_const::<SubagentStopCommandOutputWire>(
+            "SubagentStopHookSpecificOutputWire",
+            "SubagentStop",
         );
     }
 

@@ -7,6 +7,23 @@
         "block"
       ],
       "type": "string"
+    },
+    "SubagentStopHookSpecificOutputWire": {
+      "additionalProperties": false,
+      "properties": {
+        "additionalContext": {
+          "default": null,
+          "type": "string"
+        },
+        "hookEventName": {
+          "const": "SubagentStop",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hookEventName"
+      ],
+      "type": "object"
     }
   },
   "properties": {
@@ -18,6 +35,14 @@
       "allOf": [
         {
           "$ref": "#/definitions/BlockDecisionWire"
+        }
+      ],
+      "default": null
+    },
+    "hookSpecificOutput": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SubagentStopHookSpecificOutputWire"
         }
       ],
       "default": null

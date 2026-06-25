@@ -243,6 +243,14 @@ fn parse_completed(
                             text: system_message,
                         });
                     }
+                    if parsed.invalid_block_reason.is_none()
+                        && let Some(additional_context) = parsed.additional_context
+                    {
+                        entries.push(HookOutputEntry {
+                            kind: HookOutputEntryKind::Context,
+                            text: additional_context,
+                        });
+                    }
                     let _ = parsed.universal.suppress_output;
                     if !parsed.universal.continue_processing {
                         status = HookRunStatus::Stopped;
@@ -483,6 +491,81 @@ mod tests {
     }
 
     #[test]
+    fn additional_context_renders_neutral_entry_without_continuation() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"all checks passed"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.data, StopHandlerData::default());
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "all checks passed".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn system_message_keeps_warning_while_additional_context_is_neutral() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"systemMessage":"Heads up","hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"all checks passed"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.data, StopHandlerData::default());
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Warning,
+                    text: "Heads up".to_string(),
+                },
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Context,
+                    text: "all checks passed".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn subagent_stop_additional_context_renders_neutral_entry() {
+        let parsed = parse_completed(
+            &handler_for_event(HookEventName::SubagentStop),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"SubagentStop","additionalContext":"subagent checks passed"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.data, StopHandlerData::default());
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "subagent checks passed".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn continue_false_overrides_block_decision() {
         let parsed = parse_completed(
             &handler(),
@@ -629,8 +712,12 @@ mod tests {
     }
 
     fn handler() -> ConfiguredHandler {
+        handler_for_event(HookEventName::Stop)
+    }
+
+    fn handler_for_event(event_name: HookEventName) -> ConfiguredHandler {
         ConfiguredHandler {
-            event_name: HookEventName::Stop,
+            event_name,
             matcher: None,
             command: "echo hook".to_string(),
             timeout_sec: 600,
