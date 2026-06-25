@@ -36,6 +36,7 @@ pub enum SlashCommand {
     Resume,
     Fork,
     App,
+    Open,
     Init,
     Compact,
     Plan,
@@ -94,6 +95,7 @@ impl SlashCommand {
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
             SlashCommand::App => "continue this session in Codex Desktop",
+            SlashCommand::Open => "open a local path or URL",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Copy => "copy last response as markdown",
             SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
@@ -162,6 +164,7 @@ impl SlashCommand {
                 | SlashCommand::Mcp
                 | SlashCommand::Raw
                 | SlashCommand::Usage
+                | SlashCommand::Open
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
@@ -180,6 +183,7 @@ impl SlashCommand {
                 | SlashCommand::Mention
                 | SlashCommand::Status
                 | SlashCommand::Usage
+                | SlashCommand::Open
                 | SlashCommand::Ide
         )
     }
@@ -219,6 +223,7 @@ impl SlashCommand {
             | SlashCommand::Hooks
             | SlashCommand::Status
             | SlashCommand::Usage
+            | SlashCommand::Open
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop
@@ -294,6 +299,9 @@ mod tests {
         assert!(SlashCommand::Raw.available_during_task());
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
+        assert!(SlashCommand::Open.available_during_task());
+        assert!(SlashCommand::Open.available_in_side_conversation());
+        assert!(SlashCommand::Open.supports_inline_args());
         assert!(SlashCommand::App.available_during_task());
     }
 

@@ -14,6 +14,8 @@ use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
 use crate::goal_files::GoalDraft;
+use crate::open_command::open_target;
+use crate::open_command::resolve_open_target;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -36,6 +38,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const OPEN_USAGE: &str = "Usage: /open <path-or-url>";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
@@ -248,6 +251,9 @@ impl ChatWidget {
                 };
                 self.app_event_tx
                     .send(AppEvent::OpenDesktopThread { thread_id });
+            }
+            SlashCommand::Open => {
+                self.add_error_message(OPEN_USAGE.to_string());
             }
             SlashCommand::Init => {
                 const INIT_PROMPT: &str = include_str!("../../prompt_for_init_command.md");
@@ -667,6 +673,9 @@ impl ChatWidget {
         } = prepared;
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Open if !trimmed.is_empty() => {
+                self.handle_open_command(trimmed);
+            }
             SlashCommand::Usage => {
                 if self.ensure_usage_command_available() {
                     match tokens::TokenActivityView::parse(trimmed) {
@@ -1052,6 +1061,7 @@ impl ChatWidget {
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Rollout
+            | SlashCommand::Open
             | SlashCommand::Copy
             | SlashCommand::Raw
             | SlashCommand::Vim
@@ -1146,5 +1156,24 @@ impl ChatWidget {
         ));
         self.bottom_pane.drain_pending_submission_state();
         false
+    }
+
+    fn handle_open_command(&mut self, args: &str) {
+        let cwd = self
+            .current_cwd
+            .clone()
+            .unwrap_or_else(|| self.config.cwd.to_path_buf());
+        let target = match resolve_open_target(args, &cwd) {
+            Ok(target) => target,
+            Err(err) => {
+                self.add_error_message(err.to_string());
+                return;
+            }
+        };
+        let target_label = target.display_label();
+        match open_target(&target) {
+            Ok(()) => self.add_info_message(format!("Opened {target_label}."), /*hint*/ None),
+            Err(err) => self.add_error_message(format!("Failed to open {target_label}: {err}")),
+        }
     }
 }
