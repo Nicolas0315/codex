@@ -456,6 +456,16 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_vim_insert_escape_sequence(
+        &mut self,
+        sequence: Option<String>,
+        timeout: Duration,
+    ) {
+        self.composer
+            .set_vim_insert_escape_sequence(sequence, timeout);
+        self.request_redraw();
+    }
+
     pub(crate) fn toggle_vim_enabled(&mut self) -> bool {
         let enabled = self.composer.toggle_vim_enabled();
         self.request_redraw();

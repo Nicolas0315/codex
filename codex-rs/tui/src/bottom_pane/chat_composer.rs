@@ -1035,6 +1035,17 @@ impl ChatComposer {
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
     }
 
+    pub(crate) fn set_vim_insert_escape_sequence(
+        &mut self,
+        sequence: Option<String>,
+        timeout: Duration,
+    ) {
+        self.draft
+            .textarea
+            .set_vim_insert_escape_sequence(sequence, timeout);
+        self.draft.paste_burst.clear_after_explicit_paste();
+    }
+
     /// Toggle Vim editing and return the new enabled state.
     ///
     /// This is the app-level command target for the configurable Vim toggle
@@ -3244,6 +3255,16 @@ impl ChatComposer {
         // This is intentionally limited to "plain" (no Ctrl/Alt) chars so shortcuts keep their
         // normal semantics, and so we can aggressively flush/clear any burst state when non-char
         // keys are pressed.
+        let bypass_vim_insert_escape_sequence = self
+            .draft
+            .textarea
+            .should_bypass_paste_burst_for_vim_insert_escape_sequence(input);
+        if bypass_vim_insert_escape_sequence {
+            if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
+                self.handle_paste(pasted);
+            }
+            self.draft.paste_burst.clear_window_after_non_char();
+        }
         if let KeyEvent {
             code: KeyCode::Char(ch),
             modifiers,
@@ -3254,6 +3275,7 @@ impl ChatComposer {
             if !has_ctrl_or_alt
                 && !self.draft.disable_paste_burst
                 && self.draft.textarea.allows_paste_burst()
+                && !bypass_vim_insert_escape_sequence
             {
                 // Non-ASCII characters (e.g., from IMEs) can arrive in quick bursts, so avoid
                 // holding the first char while still allowing burst detection for paste input.
@@ -5390,6 +5412,36 @@ mod tests {
         );
         assert_eq!(composer.footer.mode, FooterMode::ComposerEmpty);
         assert!(!composer.footer.esc_backtrack_hint);
+    }
+
+    #[test]
+    fn vim_insert_escape_sequence_bypasses_paste_burst() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ true,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_vim_enabled(/*enabled*/ true);
+        composer.set_vim_insert_escape_sequence(Some("jj".to_string()), Duration::from_millis(300));
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert!(composer.is_empty());
+        assert!(!composer.is_in_paste_burst());
+        assert_eq!(
+            composer.vim_mode_indicator_span(),
+            Some("Vim: Normal".magenta())
+        );
     }
 
     #[test]

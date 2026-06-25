@@ -36,6 +36,7 @@ use codex_config::permissions_toml::WorkspaceRootsToml;
 use codex_config::types::AppToolApproval;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::BundledSkillsConfig;
+use codex_config::types::DEFAULT_TUI_VIM_INSERT_ESCAPE_TIMEOUT_MS;
 use codex_config::types::FeedbackConfigToml;
 use codex_config::types::HistoryPersistence;
 use codex_config::types::McpServerEnvVar;
@@ -60,6 +61,7 @@ use codex_config::types::Tui;
 use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
+use codex_config::types::TuiVim;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
 use codex_core_plugins::PluginsManager;
@@ -831,6 +833,7 @@ fn config_toml_deserializes_model_availability_nux() {
             animations: true,
             show_tooltips: true,
             vim_mode_default: false,
+            vim: TuiVim::default(),
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
@@ -943,6 +946,75 @@ fn test_tui_vim_mode_default_true() {
             .expect("config should include tui section")
             .vim_mode_default
     );
+}
+
+#[test]
+fn test_tui_vim_insert_escape_sequence_configured() {
+    let toml = r#"
+        [tui.vim]
+        insert_escape_sequence = "jj"
+        insert_escape_timeout_ms = 250
+    "#;
+    let parsed: ConfigToml = toml::from_str(toml).expect("deserialize tui.vim config");
+    let vim = parsed.tui.expect("config should include tui section").vim;
+
+    assert_eq!(
+        vim.insert_escape_sequence
+            .expect("escape sequence should be configured")
+            .0,
+        "jj"
+    );
+    assert_eq!(vim.insert_escape_timeout_ms, 250);
+}
+
+#[test]
+fn test_tui_vim_insert_escape_sequence_rejects_single_character() {
+    let toml = r#"
+        [tui.vim]
+        insert_escape_sequence = "j"
+    "#;
+    let err = toml::from_str::<ConfigToml>(toml).expect_err("single-char sequence should fail");
+
+    assert!(
+        err.to_string()
+            .contains("tui.vim.insert_escape_sequence must contain at least two characters")
+    );
+}
+
+#[tokio::test]
+async fn runtime_config_defaults_tui_vim_insert_escape_sequence() {
+    let cfg = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(cfg.tui_vim_insert_escape_sequence, None);
+    assert_eq!(
+        cfg.tui_vim_insert_escape_timeout_ms,
+        DEFAULT_TUI_VIM_INSERT_ESCAPE_TIMEOUT_MS
+    );
+}
+
+#[tokio::test]
+async fn runtime_config_reads_tui_vim_insert_escape_sequence() {
+    let toml = r#"
+        [tui.vim]
+        insert_escape_sequence = "jk"
+        insert_escape_timeout_ms = 175
+    "#;
+    let cfg = Config::load_from_base_config_with_overrides(
+        toml::from_str(toml).expect("deserialize config"),
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(cfg.tui_vim_insert_escape_sequence, Some("jk".to_string()));
+    assert_eq!(cfg.tui_vim_insert_escape_timeout_ms, 175);
 }
 
 #[test]
@@ -3666,6 +3738,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             animations: true,
             show_tooltips: true,
             vim_mode_default: false,
+            vim: TuiVim::default(),
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,

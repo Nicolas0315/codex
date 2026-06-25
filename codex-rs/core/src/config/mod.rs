@@ -37,6 +37,7 @@ use codex_config::sandbox_mode_requirement_for_permission_profile;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::AuthKeyringBackendKind;
+use codex_config::types::DEFAULT_TUI_VIM_INSERT_ESCAPE_TIMEOUT_MS;
 use codex_config::types::History;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerDisabledReason;
@@ -745,6 +746,12 @@ pub struct Config {
 
     /// Start the composer in Vim mode (`Normal`) by default.
     pub tui_vim_mode_default: bool,
+
+    /// Plain character sequence that exits Vim insert mode when typed quickly.
+    pub tui_vim_insert_escape_sequence: Option<String>,
+
+    /// Maximum delay between Vim insert escape sequence keypresses.
+    pub tui_vim_insert_escape_timeout_ms: u64,
 
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     pub tui_raw_output_mode: bool,
@@ -3973,6 +3980,17 @@ impl Config {
                 .as_ref()
                 .map(|t| t.vim_mode_default)
                 .unwrap_or(false),
+            tui_vim_insert_escape_sequence: cfg.tui.as_ref().and_then(|t| {
+                t.vim
+                    .insert_escape_sequence
+                    .as_ref()
+                    .map(|sequence| sequence.0.clone())
+            }),
+            tui_vim_insert_escape_timeout_ms: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.vim.insert_escape_timeout_ms)
+                .unwrap_or(DEFAULT_TUI_VIM_INSERT_ESCAPE_TIMEOUT_MS),
             tui_raw_output_mode: cfg
                 .tui
                 .as_ref()

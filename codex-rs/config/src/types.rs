@@ -678,6 +678,63 @@ pub struct ModelAvailabilityNuxConfig {
 
 /// Fallback resize-reflow row cap when Codex cannot identify a terminal-specific scrollback size.
 pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
+pub const DEFAULT_TUI_VIM_INSERT_ESCAPE_TIMEOUT_MS: u64 = 300;
+
+fn default_tui_vim_insert_escape_timeout_ms() -> u64 {
+    DEFAULT_TUI_VIM_INSERT_ESCAPE_TIMEOUT_MS
+}
+
+/// Plain character sequence that leaves Vim insert mode.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(transparent)]
+pub struct TuiVimInsertEscapeSequence(#[schemars(with = "String")] pub String);
+
+impl<'de> Deserialize<'de> for TuiVimInsertEscapeSequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let char_count = raw.chars().count();
+        if char_count < 2 {
+            return Err(serde::de::Error::custom(
+                "tui.vim.insert_escape_sequence must contain at least two characters",
+            ));
+        }
+        if raw.chars().any(char::is_control) {
+            return Err(serde::de::Error::custom(
+                "tui.vim.insert_escape_sequence cannot contain control characters",
+            ));
+        }
+        Ok(Self(raw))
+    }
+}
+
+/// Vim-specific TUI settings.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct TuiVim {
+    /// Plain character sequence that exits Vim insert mode, for example `jj`.
+    ///
+    /// Disabled when unset.
+    #[serde(default)]
+    pub insert_escape_sequence: Option<TuiVimInsertEscapeSequence>,
+
+    /// Maximum delay between sequence keypresses.
+    ///
+    /// Defaults to 300ms.
+    #[serde(default = "default_tui_vim_insert_escape_timeout_ms")]
+    pub insert_escape_timeout_ms: u64,
+}
+
+impl Default for TuiVim {
+    fn default() -> Self {
+        Self {
+            insert_escape_sequence: None,
+            insert_escape_timeout_ms: default_tui_vim_insert_escape_timeout_ms(),
+        }
+    }
+}
 
 /// Collection of settings that are specific to the TUI.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
@@ -700,6 +757,10 @@ pub struct Tui {
     /// Defaults to `false`.
     #[serde(default)]
     pub vim_mode_default: bool,
+
+    /// Vim-specific TUI settings.
+    #[serde(default)]
+    pub vim: TuiVim,
 
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     /// Defaults to `false`.

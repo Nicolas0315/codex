@@ -250,6 +250,10 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_vim_enabled(widget.config.tui_vim_mode_default);
+        widget.bottom_pane.set_vim_insert_escape_sequence(
+            widget.config.tui_vim_insert_escape_sequence.clone(),
+            Duration::from_millis(widget.config.tui_vim_insert_escape_timeout_ms),
+        );
         widget
             .bottom_pane
             .set_status_line_enabled(!widget.configured_status_line_items().is_empty());

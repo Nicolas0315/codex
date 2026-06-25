@@ -32,6 +32,8 @@ use ratatui::widgets::WidgetRef;
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::ops::Range;
+use std::time::Duration;
+use std::time::Instant;
 use textwrap::Options;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -82,6 +84,19 @@ struct TextElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct VimInsertEscapeConfig {
+    sequence: String,
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct VimInsertEscapePending {
+    prefix: String,
+    start: usize,
+    last_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TextElementSnapshot {
     pub(crate) id: u64,
     pub(crate) range: Range<usize>,
@@ -109,6 +124,8 @@ pub(crate) struct TextArea {
     vim_enabled: bool,
     vim_mode: VimMode,
     vim_pending: VimPending,
+    vim_insert_escape_sequence: Option<VimInsertEscapeConfig>,
+    vim_insert_escape_pending: Option<VimInsertEscapePending>,
     editor_keymap: EditorKeymap,
     vim_normal_keymap: VimNormalKeymap,
     vim_operator_keymap: VimOperatorKeymap,
@@ -150,6 +167,8 @@ impl TextArea {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_pending: VimPending::None,
+            vim_insert_escape_sequence: None,
+            vim_insert_escape_pending: None,
             editor_keymap: defaults.editor,
             vim_normal_keymap: defaults.vim_normal,
             vim_operator_keymap: defaults.vim_operator,
@@ -218,6 +237,7 @@ impl TextArea {
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
         self.wrap_cache.replace(None);
         self.preferred_col = None;
+        self.vim_insert_escape_pending = None;
     }
 
     /// Enable or disable modal Vim editing for the textarea.
@@ -229,11 +249,26 @@ impl TextArea {
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.vim_enabled = enabled;
         self.vim_pending = VimPending::None;
+        self.vim_insert_escape_pending = None;
         self.vim_mode = if enabled {
             VimMode::Normal
         } else {
             VimMode::Insert
         };
+    }
+
+    /// Configure the plain character sequence that exits Vim insert mode.
+    pub(crate) fn set_vim_insert_escape_sequence(
+        &mut self,
+        sequence: Option<String>,
+        timeout: Duration,
+    ) {
+        self.vim_insert_escape_sequence = sequence
+            .filter(|sequence| {
+                sequence.chars().count() >= 2 && !sequence.chars().any(char::is_control)
+            })
+            .map(|sequence| VimInsertEscapeConfig { sequence, timeout });
+        self.vim_insert_escape_pending = None;
     }
 
     /// Return whether modal Vim editing is currently enabled.
@@ -276,6 +311,7 @@ impl TextArea {
         if self.vim_enabled {
             self.vim_mode = VimMode::Insert;
             self.vim_pending = VimPending::None;
+            self.vim_insert_escape_pending = None;
         }
     }
 
@@ -289,6 +325,7 @@ impl TextArea {
         if self.vim_enabled {
             self.vim_mode = VimMode::Normal;
             self.vim_pending = VimPending::None;
+            self.vim_insert_escape_pending = None;
             self.preferred_col = None;
         }
     }
@@ -318,6 +355,25 @@ impl TextArea {
             && event.code == KeyCode::Esc
             && event.modifiers == KeyModifiers::NONE
             && matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+    }
+
+    /// Return whether a key should bypass paste-burst buffering so the configured
+    /// Vim insert escape sequence can be evaluated immediately.
+    pub(crate) fn should_bypass_paste_burst_for_vim_insert_escape_sequence(
+        &self,
+        event: KeyEvent,
+    ) -> bool {
+        if !self.vim_enabled || self.vim_mode != VimMode::Insert {
+            return false;
+        }
+        let Some(config) = self.vim_insert_escape_sequence.as_ref() else {
+            return false;
+        };
+        let Some(ch) = Self::plain_input_char(event) else {
+            return false;
+        };
+
+        self.vim_insert_escape_pending.is_some() || config.sequence.starts_with(ch)
     }
 
     /// Return the footer label for the active Vim mode.
@@ -628,15 +684,138 @@ impl TextArea {
 
     fn handle_vim_insert(&mut self, event: KeyEvent) {
         if matches!(event.code, KeyCode::Esc) {
-            let bol = self.beginning_of_current_line();
-            if self.cursor_pos > bol {
-                self.cursor_pos = self.prev_atomic_boundary(self.cursor_pos).max(bol);
-            }
-            self.enter_vim_normal_mode();
+            self.leave_vim_insert_mode();
             return;
         }
+
+        if self.try_handle_vim_insert_escape_sequence(event) {
+            return;
+        }
+
+        let before_cursor = self.cursor_pos;
+        let before_len = self.text.len();
         let keymap = self.editor_keymap.clone();
         self.input_with_keymap(event, &keymap);
+        self.update_vim_insert_escape_pending_after_input(event, before_cursor, before_len);
+    }
+
+    fn leave_vim_insert_mode(&mut self) {
+        let bol = self.beginning_of_current_line();
+        if self.cursor_pos > bol {
+            self.cursor_pos = self.prev_atomic_boundary(self.cursor_pos).max(bol);
+        }
+        self.enter_vim_normal_mode();
+    }
+
+    fn try_handle_vim_insert_escape_sequence(&mut self, event: KeyEvent) -> bool {
+        let Some(config) = self.vim_insert_escape_sequence.clone() else {
+            self.vim_insert_escape_pending = None;
+            return false;
+        };
+        let Some(ch) = Self::plain_input_char(event) else {
+            return false;
+        };
+        let Some(pending) = self.vim_insert_escape_pending.as_ref() else {
+            return false;
+        };
+
+        let now = Instant::now();
+        if now.duration_since(pending.last_at) > config.timeout
+            || !self.vim_insert_escape_pending_is_valid(pending)
+        {
+            self.vim_insert_escape_pending = None;
+            return false;
+        }
+
+        let mut candidate = pending.prefix.clone();
+        candidate.push(ch);
+        if candidate == config.sequence {
+            let start = pending.start;
+            let end = start + pending.prefix.len();
+            self.vim_insert_escape_pending = None;
+            self.replace_range_raw(start..end, "");
+            self.leave_vim_insert_mode();
+            return true;
+        }
+
+        if !config.sequence.starts_with(&candidate) {
+            self.vim_insert_escape_pending = None;
+        }
+        false
+    }
+
+    fn update_vim_insert_escape_pending_after_input(
+        &mut self,
+        event: KeyEvent,
+        before_cursor: usize,
+        before_len: usize,
+    ) {
+        let Some(config) = self.vim_insert_escape_sequence.clone() else {
+            self.vim_insert_escape_pending = None;
+            return;
+        };
+        let Some(ch) = Self::plain_input_char(event) else {
+            self.vim_insert_escape_pending = None;
+            return;
+        };
+        let inserted = ch.to_string();
+        if self.text.len() != before_len + inserted.len()
+            || self.cursor_pos != before_cursor + inserted.len()
+            || self.text.get(before_cursor..self.cursor_pos) != Some(inserted.as_str())
+        {
+            self.vim_insert_escape_pending = None;
+            return;
+        }
+
+        let now = Instant::now();
+        let mut next_pending = None;
+        if let Some(pending) = self.vim_insert_escape_pending.take()
+            && now.duration_since(pending.last_at) <= config.timeout
+            && self.vim_insert_escape_pending_is_valid(&pending)
+        {
+            let mut candidate = pending.prefix;
+            candidate.push(ch);
+            if config.sequence.starts_with(&candidate) && candidate != config.sequence {
+                next_pending = Some(VimInsertEscapePending {
+                    prefix: candidate,
+                    start: pending.start,
+                    last_at: now,
+                });
+            }
+        }
+
+        if next_pending.is_none() && config.sequence.starts_with(ch) && inserted != config.sequence
+        {
+            next_pending = Some(VimInsertEscapePending {
+                prefix: inserted,
+                start: before_cursor,
+                last_at: now,
+            });
+        }
+
+        self.vim_insert_escape_pending = next_pending;
+    }
+
+    fn vim_insert_escape_pending_is_valid(&self, pending: &VimInsertEscapePending) -> bool {
+        let end = pending.start + pending.prefix.len();
+        self.cursor_pos == end
+            && self
+                .text
+                .get(pending.start..end)
+                .is_some_and(|text| text == pending.prefix.as_str())
+    }
+
+    fn plain_input_char(event: KeyEvent) -> Option<char> {
+        let KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press | KeyEventKind::Repeat,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        (!ch.is_control()).then_some(ch)
     }
 
     fn handle_vim_normal(&mut self, event: KeyEvent) {
@@ -2167,6 +2346,55 @@ mod tests {
         assert_eq!(t.text(), "h");
         assert_eq!(t.vim_mode_label(), Some("Normal"));
         assert_eq!(t.cursor(), 0);
+    }
+
+    #[test]
+    fn vim_insert_escape_sequence_enters_normal_without_inserting_sequence() {
+        let mut t = TextArea::new();
+        t.set_vim_insert_escape_sequence(Some("jj".to_string()), Duration::from_millis(300));
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(t.text(), "a");
+        assert_eq!(t.vim_mode_label(), Some("Normal"));
+        assert_eq!(t.cursor(), 0);
+    }
+
+    #[test]
+    fn vim_insert_escape_sequence_keeps_slow_text() {
+        let mut t = TextArea::new();
+        t.set_vim_insert_escape_sequence(Some("jj".to_string()), Duration::from_millis(300));
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        t.vim_insert_escape_pending
+            .as_mut()
+            .expect("first j should be pending")
+            .last_at = Instant::now() - Duration::from_millis(301);
+        t.input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(t.text(), "jj");
+        assert_eq!(t.vim_mode_label(), Some("Insert"));
+        assert_eq!(t.cursor(), 2);
+    }
+
+    #[test]
+    fn vim_insert_escape_sequence_disabled_keeps_text() {
+        let mut t = TextArea::new();
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(t.text(), "jj");
+        assert_eq!(t.vim_mode_label(), Some("Insert"));
+        assert_eq!(t.cursor(), 2);
     }
 
     #[test]
