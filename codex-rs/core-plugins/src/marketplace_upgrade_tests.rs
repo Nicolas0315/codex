@@ -135,6 +135,50 @@ ref = "missing-ref"
 }
 
 #[test]
+fn upgrade_uses_shallow_clone_for_git_marketplace() {
+    let codex_home = TempDir::new().expect("create Codex home");
+    let remote_repo = TempDir::new().expect("create remote repository");
+    let old_revision = init_marketplace_repo(remote_repo.path(), "good");
+    let new_revision = commit_marketplace_marker(remote_repo.path(), "new marker");
+    let source_url = url::Url::from_directory_path(remote_repo.path())
+        .expect("remote repository URL")
+        .to_string();
+    let config = format!(
+        r#"
+[marketplaces.good]
+source_type = "git"
+source = {source_url:?}
+last_revision = {old_revision:?}
+"#
+    );
+    std::fs::write(codex_home.path().join(CONFIG_TOML_FILE), &config).expect("write config");
+    let stack = config_layer_stack(codex_home.path(), &config);
+
+    let outcome = upgrade_configured_git_marketplaces(
+        codex_home.path(),
+        &stack,
+        /*marketplace_name*/ Some("good"),
+    );
+
+    assert_eq!(outcome.errors, Vec::new());
+    assert_eq!(outcome.selected_marketplaces, vec!["good".to_string()]);
+    let installed_root = marketplace_install_root(codex_home.path()).join("good");
+    assert_eq!(
+        run_git_output(&installed_root, &["rev-parse", "HEAD"]),
+        new_revision
+    );
+    assert_eq!(
+        run_git_output(&installed_root, &["rev-list", "--count", "HEAD"]),
+        "1"
+    );
+    assert!(installed_root.join(".git/shallow").exists());
+    assert_eq!(
+        leftover_marketplace_upgrade_staging_dirs(codex_home.path()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn up_to_date_fast_path_validates_marketplace_name() {
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
     let codex_home = TempDir::new().expect("create Codex home");
@@ -191,7 +235,7 @@ fn config_layer_stack(codex_home: &Path, config: &str) -> ConfigLayerStack {
     .expect("build config layer stack")
 }
 
-fn init_marketplace_repo(repo: &Path, marketplace_name: &str) {
+fn init_marketplace_repo(repo: &Path, marketplace_name: &str) -> String {
     let manifest_dir = repo.join(".agents/plugins");
     std::fs::create_dir_all(&manifest_dir).expect("create marketplace manifest directory");
     std::fs::write(
@@ -204,9 +248,36 @@ fn init_marketplace_repo(repo: &Path, marketplace_name: &str) {
     run_git(repo, &["config", "user.name", "Codex Test"]);
     run_git(repo, &["add", "."]);
     run_git(repo, &["commit", "-m", "initial"]);
+    run_git_output(repo, &["rev-parse", "HEAD"])
+}
+
+fn commit_marketplace_marker(repo: &Path, marker: &str) -> String {
+    std::fs::write(repo.join("marker.txt"), marker).expect("write marker");
+    run_git(repo, &["add", "marker.txt"]);
+    run_git(repo, &["commit", "-m", "update marker"]);
+    run_git_output(repo, &["rev-parse", "HEAD"])
+}
+
+fn leftover_marketplace_upgrade_staging_dirs(codex_home: &Path) -> Vec<String> {
+    let staging_root = marketplace_install_root(codex_home).join(".staging");
+    let Ok(entries) = std::fs::read_dir(staging_root) else {
+        return Vec::new();
+    };
+
+    let mut dirs = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("marketplace-upgrade-"))
+        .collect::<Vec<_>>();
+    dirs.sort_unstable();
+    dirs
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
+    let _ = run_git_output(repo, args);
+}
+
+fn run_git_output(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -218,4 +289,5 @@ fn run_git(repo: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }

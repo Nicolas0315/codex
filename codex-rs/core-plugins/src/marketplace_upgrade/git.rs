@@ -48,12 +48,20 @@ pub(super) fn clone_git_source(
     timeout: Duration,
 ) -> Result<String, String> {
     let git_destination = git_path_arg(destination);
+    let shallow_clone = should_shallow_clone(ref_name);
+    let branch_arg = shallow_clone_branch_arg(ref_name);
     if sparse_paths.is_empty() {
-        let output = run_git_command_with_timeout(
-            git_command().arg("clone").arg(source).arg(&git_destination),
-            "git clone marketplace source",
-            timeout,
-        )?;
+        let mut clone = git_command();
+        clone.arg("clone");
+        if shallow_clone {
+            clone.arg("--depth").arg("1");
+        }
+        if let Some(branch_arg) = branch_arg {
+            clone.arg("--branch").arg(branch_arg);
+        }
+        clone.arg(source).arg(&git_destination);
+        let output =
+            run_git_command_with_timeout(&mut clone, "git clone marketplace source", timeout)?;
         ensure_git_success(&output, "git clone marketplace source")?;
         if let Some(ref_name) = ref_name {
             let output = run_git_command_with_timeout(
@@ -70,16 +78,17 @@ pub(super) fn clone_git_source(
         return git_worktree_revision(&git_destination, timeout);
     }
 
-    let output = run_git_command_with_timeout(
-        git_command()
-            .arg("clone")
-            .arg("--filter=blob:none")
-            .arg("--no-checkout")
-            .arg(source)
-            .arg(&git_destination),
-        "git clone marketplace source",
-        timeout,
-    )?;
+    let mut clone = git_command();
+    clone.arg("clone");
+    if shallow_clone {
+        clone.arg("--depth").arg("1");
+    }
+    clone.arg("--filter=blob:none").arg("--no-checkout");
+    if let Some(branch_arg) = branch_arg {
+        clone.arg("--branch").arg(branch_arg);
+    }
+    clone.arg(source).arg(&git_destination);
+    let output = run_git_command_with_timeout(&mut clone, "git clone marketplace source", timeout)?;
     ensure_git_success(&output, "git clone marketplace source")?;
 
     let mut sparse_checkout = git_command();
@@ -131,6 +140,18 @@ fn git_worktree_revision(destination: &Path, timeout: Duration) -> Result<String
 
 fn is_full_git_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn should_shallow_clone(ref_name: Option<&str>) -> bool {
+    ref_name.is_none_or(|ref_name| {
+        ref_name == "HEAD" || (!is_full_git_sha(ref_name) && !ref_name.starts_with("refs/"))
+    })
+}
+
+fn shallow_clone_branch_arg(ref_name: Option<&str>) -> Option<&str> {
+    ref_name.filter(|ref_name| {
+        *ref_name != "HEAD" && !is_full_git_sha(ref_name) && !ref_name.starts_with("refs/")
+    })
 }
 
 fn git_command() -> Command {
@@ -234,6 +255,29 @@ mod tests {
         assert!(is_full_git_sha("0123456789abcdef0123456789abcdef01234567"));
         assert!(!is_full_git_sha("main"));
         assert!(!is_full_git_sha("0123456"));
+    }
+
+    #[test]
+    fn shallow_clone_is_used_for_default_and_branch_like_refs() {
+        assert!(super::should_shallow_clone(None));
+        assert!(super::should_shallow_clone(Some("HEAD")));
+        assert!(super::should_shallow_clone(Some("main")));
+        assert!(!super::should_shallow_clone(Some(
+            "0123456789abcdef0123456789abcdef01234567"
+        )));
+        assert!(!super::should_shallow_clone(Some("refs/pull/123/head")));
+
+        assert_eq!(super::shallow_clone_branch_arg(None), None);
+        assert_eq!(super::shallow_clone_branch_arg(Some("HEAD")), None);
+        assert_eq!(super::shallow_clone_branch_arg(Some("main")), Some("main"));
+        assert_eq!(
+            super::shallow_clone_branch_arg(Some("0123456789abcdef0123456789abcdef01234567")),
+            None
+        );
+        assert_eq!(
+            super::shallow_clone_branch_arg(Some("refs/pull/123/head")),
+            None
+        );
     }
 
     #[test]
