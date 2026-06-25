@@ -290,8 +290,9 @@ pub fn terminal_info() -> TerminalInfo {
 /// - If `TERM_PROGRAM=tmux`, the tmux client term type/name are used instead. The client term
 ///   type is split on whitespace to extract a program name plus optional version (for example,
 ///   `ghostty 1.2.3`), while the client term name becomes the `TERM` capability string.
-/// - Otherwise, `TERM_PROGRAM` (plus `TERM_PROGRAM_VERSION`) drives the detected terminal name.
-///   This means `TERM_PROGRAM` can mask later probes (for example `WT_SESSION`).
+/// - Otherwise, `TERM_PROGRAM` (plus `TERM_PROGRAM_VERSION`) drives the detected terminal name
+///   when it is recognized. Unknown `TERM_PROGRAM` values still allow later authoritative probes
+///   such as `WT_SESSION`.
 /// - Next, terminal-specific variables (WEZTERM, iTerm2, Apple Terminal, kitty, etc.) are checked.
 /// - Finally, `TERM` is used as the capability fallback with `TerminalName::Unknown`.
 ///
@@ -312,6 +313,13 @@ fn detect_terminal_info_from_env(env: &dyn Environment) -> TerminalInfo {
 
         let version = env.var_non_empty("TERM_PROGRAM_VERSION");
         let name = terminal_name_from_term_program(&term_program).unwrap_or(TerminalName::Unknown);
+        if name == TerminalName::Unknown && env.has("WT_SESSION") {
+            return TerminalInfo::from_name(
+                TerminalName::WindowsTerminal,
+                /*version*/ None,
+                multiplexer,
+            );
+        }
         return TerminalInfo::from_term_program(name, term_program, version, multiplexer);
     }
 

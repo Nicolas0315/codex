@@ -889,6 +889,28 @@ fn detects_windows_terminal() {
         "WindowsTerminal/1.21",
         "windows_terminal_term_program_user_agent"
     );
+
+    let env = FakeEnvironment::new()
+        .with_var("TERM_PROGRAM", "PowerShell")
+        .with_var("TERM_PROGRAM_VERSION", "7.5.4")
+        .with_var("WT_SESSION", "1");
+    let terminal = detect_terminal_info_from_env(&env);
+    assert_eq!(
+        terminal,
+        terminal_info(
+            TerminalName::WindowsTerminal,
+            /*term_program*/ None,
+            /*version*/ None,
+            /*term*/ None,
+            /*multiplexer*/ None,
+        ),
+        "wt_session_over_unknown_term_program_info"
+    );
+    assert_eq!(
+        terminal.user_agent_token(),
+        "WindowsTerminal",
+        "wt_session_over_unknown_term_program_user_agent"
+    );
 }
 
 #[test]
