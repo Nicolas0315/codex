@@ -406,7 +406,7 @@ async fn collect_compaction_output(
         match event? {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
-                if let ResponseItem::Compaction { .. } = item {
+                if is_remote_compaction_v2_output_item(&item) {
                     compaction_count += 1;
                     if compaction_output.is_none() {
                         compaction_output = Some(item);
@@ -442,6 +442,13 @@ async fn collect_compaction_output(
         compaction_output,
         token_usage: completed_token_usage,
     })
+}
+
+fn is_remote_compaction_v2_output_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+    )
 }
 
 fn build_v2_compacted_history(
@@ -863,5 +870,34 @@ mod tests {
                 total_tokens: 123_498,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn collect_compaction_output_accepts_context_compaction_item() {
+        let compaction = ResponseItem::ContextCompaction {
+            id: None,
+            encrypted_content: Some("encrypted".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let stream = response_stream(vec![
+            Ok(ResponseEvent::OutputItemDone(message(
+                "assistant",
+                "IGNORED_COMPACT_REPLY",
+                Some(MessagePhase::FinalAnswer),
+            ))),
+            Ok(ResponseEvent::OutputItemDone(compaction.clone())),
+            Ok(ResponseEvent::Completed {
+                response_id: "resp-compact".to_string(),
+                token_usage: None,
+                end_turn: Some(true),
+            }),
+        ]);
+
+        let output = collect_compaction_output(stream)
+            .await
+            .expect("context compaction should be collected");
+
+        assert_eq!(output.compaction_output, compaction);
+        assert_eq!(output.token_usage, None);
     }
 }
