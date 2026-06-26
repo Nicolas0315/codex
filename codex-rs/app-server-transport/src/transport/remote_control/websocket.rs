@@ -865,7 +865,11 @@ impl RemoteControlWebsocket {
                     ConnectionEndReason::EnabledWatchClosed
                 }
             }
-            _ = join_set.join_next() => ConnectionEndReason::ConnectionWorkerStopped,
+            _ = join_set.join_next() => {
+                self.status_publisher
+                    .publish_status(RemoteControlConnectionStatus::Connecting);
+                ConnectionEndReason::ConnectionWorkerStopped
+            }
         };
         shutdown_token.cancel();
 
@@ -2679,6 +2683,72 @@ mod tests {
             .await;
 
         assert!(join_set.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_connection_marks_status_connecting_when_worker_stops_before_drain() {
+        let (client_stream, server_stream) = connected_websocket_pair().await;
+        let remote_control_url = "http://localhost/backend-api/".to_string();
+        let remote_control_target =
+            normalize_remote_control_url(&remote_control_url).expect("target should normalize");
+        let (transport_event_tx, _transport_event_rx) =
+            mpsc::channel(super::super::CHANNEL_CAPACITY);
+        let (status_publisher, mut status_rx) = remote_control_status_channel();
+        status_publisher.publish_status(RemoteControlConnectionStatus::Connected);
+        let _ = status_rx.borrow_and_update();
+        let connection_shutdown_token = CancellationToken::new();
+        let websocket = RemoteControlWebsocket::new(
+            RemoteControlWebsocketConfig {
+                remote_control_url,
+                installation_id: TEST_INSTALLATION_ID.to_string(),
+                remote_control_target: Some(remote_control_target),
+                server_name: "test-server".to_string(),
+            },
+            /*state_db*/ None,
+            remote_control_auth_manager(),
+            RemoteControlChannels {
+                transport_event_tx,
+                status_publisher,
+                current_enrollment: test_current_enrollment(/*enrollment*/ None),
+                pairing_persistence_key: watch::channel(None).0,
+                desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+            },
+            CancellationToken::new(),
+            Arc::new(enabled_desired_state_sender()),
+        );
+        let server_event_rx = websocket.server_event_rx.clone();
+        let server_event_rx_guard = server_event_rx.lock().await;
+        let mut connection_task = tokio::spawn(async move {
+            websocket
+                .run_connection(client_stream, connection_shutdown_token)
+                .await
+        });
+
+        drop(server_stream);
+        timeout(Duration::from_secs(5), status_rx.changed())
+            .await
+            .expect("status should change after a connection worker stops")
+            .expect("status watch should remain open");
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Connecting
+        );
+        assert!(
+            timeout(Duration::from_millis(50), &mut connection_task)
+                .await
+                .is_err(),
+            "status should be published before draining the stuck sibling worker"
+        );
+
+        drop(server_event_rx_guard);
+        let connection_end_reason = timeout(Duration::from_secs(1), connection_task)
+            .await
+            .expect("connection should drain after releasing the sibling worker")
+            .expect("connection task should join");
+        assert!(matches!(
+            connection_end_reason,
+            ConnectionEndReason::ConnectionWorkerStopped
+        ));
     }
 
     #[tokio::test]

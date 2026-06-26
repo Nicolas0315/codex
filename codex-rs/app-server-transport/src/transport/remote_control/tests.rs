@@ -858,11 +858,31 @@ async fn remote_control_transport_reconnects_after_disconnect() {
         first_handshake_request.headers.get("authorization"),
         Some(&format!("Bearer {TEST_REMOTE_CONTROL_SERVER_TOKEN}"))
     );
+    expect_remote_control_status_snapshot(
+        &mut status_rx,
+        RemoteControlStatusChangedNotification {
+            status: RemoteControlConnectionStatus::Connected,
+            server_name: test_server_name(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            environment_id: Some("env_test".to_string()),
+        },
+    )
+    .await;
     first_websocket
         .close(None)
         .await
         .expect("first websocket should close");
     drop(first_websocket);
+    expect_remote_control_status_snapshot(
+        &mut status_rx,
+        RemoteControlStatusChangedNotification {
+            status: RemoteControlConnectionStatus::Connecting,
+            server_name: test_server_name(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            environment_id: Some("env_test".to_string()),
+        },
+    )
+    .await;
 
     let (second_handshake_request, mut second_websocket) =
         accept_remote_control_backend_connection(&listener).await;
@@ -870,10 +890,14 @@ async fn remote_control_transport_reconnects_after_disconnect() {
         second_handshake_request.headers.get("authorization"),
         Some(&format!("Bearer {TEST_REMOTE_CONTROL_SERVER_TOKEN}"))
     );
-    expect_remote_control_status(
+    expect_remote_control_status_snapshot(
         &mut status_rx,
-        /*expected_status*/ None,
-        Some("env_test"),
+        RemoteControlStatusChangedNotification {
+            status: RemoteControlConnectionStatus::Connected,
+            server_name: test_server_name(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            environment_id: Some("env_test".to_string()),
+        },
     )
     .await;
     send_client_event(
