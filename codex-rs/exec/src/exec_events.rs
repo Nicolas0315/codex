@@ -1,3 +1,4 @@
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::WebSearchAction;
 use serde::Deserialize;
 use serde::Serialize;
@@ -134,6 +135,11 @@ pub enum ThreadItemDetails {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct AgentMessageItem {
     pub text: String,
+    /// Classifies the message as interim commentary or the final answer for
+    /// the turn. Omitted when the model did not report a phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<MessagePhase>,
 }
 
 /// Agent's reasoning summary.

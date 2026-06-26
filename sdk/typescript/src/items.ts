@@ -71,12 +71,17 @@ export type McpToolCallItem = {
   status: McpToolCallStatus;
 };
 
+/** Classifies an assistant message as interim commentary or the final answer for the turn. */
+export type MessagePhase = "commentary" | "final_answer";
+
 /** Response from the agent. Either natural-language text or JSON when structured output is requested. */
 export type AgentMessageItem = {
   id: string;
   type: "agent_message";
   /** Either natural-language text or JSON when structured output is requested. */
   text: string;
+  /** Phase of the message; omitted when the model did not report one. */
+  phase?: MessagePhase;
 };
 
 /** Agent's reasoning summary. */

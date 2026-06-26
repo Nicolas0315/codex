@@ -29,6 +29,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WebSearchAction as ApiWebSearchAction;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::AskForApproval;
@@ -315,6 +316,7 @@ fn unsupported_items_do_not_consume_synthetic_ids() {
                     id: "item_0".to_string(),
                     details: ThreadItemDetails::AgentMessage(AgentMessageItem {
                         text: "hello".to_string(),
+                        phase: None,
                     }),
                 },
             })],
@@ -928,6 +930,7 @@ fn agent_message_item_updates_final_message() {
                     id: "item_0".to_string(),
                     details: ThreadItemDetails::AgentMessage(AgentMessageItem {
                         text: "hello".to_string(),
+                        phase: None,
                     }),
                 },
             })],
@@ -935,6 +938,41 @@ fn agent_message_item_updates_final_message() {
         }
     );
     assert_eq!(processor.final_message(), Some("hello"));
+}
+
+#[test]
+fn agent_message_item_surfaces_phase() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            item: ThreadItem::AgentMessage {
+                id: "msg-1".to_string(),
+                text: "preamble".to_string(),
+                phase: Some(MessagePhase::Commentary),
+                memory_citation: None,
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+        },
+    ));
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ItemCompleted(ItemCompletedEvent {
+                item: ExecThreadItem {
+                    id: "item_0".to_string(),
+                    details: ThreadItemDetails::AgentMessage(AgentMessageItem {
+                        text: "preamble".to_string(),
+                        phase: Some(MessagePhase::Commentary),
+                    }),
+                },
+            })],
+            status: CodexStatus::Running,
+        }
+    );
 }
 
 #[test]

@@ -143,9 +143,9 @@ impl EventProcessorWithJsonOutput {
         make_id: impl FnOnce() -> String,
     ) -> Option<ExecThreadItem> {
         match item {
-            ThreadItem::AgentMessage { text, .. } => Some(ExecThreadItem {
+            ThreadItem::AgentMessage { text, phase, .. } => Some(ExecThreadItem {
                 id: make_id(),
-                details: ThreadItemDetails::AgentMessage(AgentMessageItem { text }),
+                details: ThreadItemDetails::AgentMessage(AgentMessageItem { text, phase }),
             }),
             ThreadItem::Reasoning { summary, .. } => {
                 let text = summary.join("\n");
@@ -473,7 +473,7 @@ impl EventProcessorWithJsonOutput {
             }
             ServerNotification::ItemCompleted(notification) => {
                 if let Some(item) = self.map_completed_item_mut(notification.item) {
-                    if let ThreadItemDetails::AgentMessage(AgentMessageItem { text }) =
+                    if let ThreadItemDetails::AgentMessage(AgentMessageItem { text, .. }) =
                         &item.details
                     {
                         self.final_message = Some(text.clone());
