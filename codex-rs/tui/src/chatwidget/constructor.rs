@@ -164,7 +164,7 @@ impl ChatWidget {
             mcp_startup_pending_next_round: HashMap::new(),
             mcp_startup_pending_next_round_saw_starting: false,
             connectors: ConnectorsState::default(),
-            ide_context: IdeContextState::default(),
+            ide_context: IdeContextState::for_startup(crate::tui::running_in_vscode_terminal()),
             plugins_cache: PluginsCacheState::default(),
             plugins_fetch_state: PluginListFetchState::default(),
             plugin_remote_sections_loading: false,
@@ -279,6 +279,7 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_token_activity_command_enabled(widget.has_codex_backend_auth);
+        widget.sync_ide_context_status_indicator();
         widget.refresh_status_surfaces();
 
         widget

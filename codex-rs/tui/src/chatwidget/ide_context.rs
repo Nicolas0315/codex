@@ -11,6 +11,13 @@ pub(super) struct IdeContextState {
 }
 
 impl IdeContextState {
+    pub(super) fn for_startup(running_in_vscode_terminal: bool) -> Self {
+        Self {
+            enabled: running_in_vscode_terminal,
+            prompt_fetch_warned: false,
+        }
+    }
+
     pub(super) fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -128,5 +135,16 @@ impl ChatWidget {
     pub(super) fn sync_ide_context_status_indicator(&mut self) {
         self.bottom_pane
             .set_ide_context_active(self.ide_context.is_enabled());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IdeContextState;
+
+    #[test]
+    fn startup_enables_ide_context_inside_vscode_terminal() {
+        assert!(IdeContextState::for_startup(true).is_enabled());
+        assert!(!IdeContextState::for_startup(false).is_enabled());
     }
 }
