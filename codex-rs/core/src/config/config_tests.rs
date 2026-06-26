@@ -829,6 +829,7 @@ fn config_toml_deserializes_model_availability_nux() {
             theme: None,
             pet: None,
             pet_anchor: TuiPetAnchor::Composer,
+            pet_status_animation_duration_seconds: None,
             session_picker_view: None,
             keymap: TuiKeymap::default(),
             model_availability_nux: ModelAvailabilityNuxConfig {
@@ -3599,6 +3600,60 @@ fn tui_pet_defaults_to_none() {
 }
 
 #[test]
+fn tui_pet_status_animation_duration_deserializes_from_toml() {
+    let cfg = r#"
+[tui]
+pet_status_animation_duration_seconds = 120
+"#;
+    let parsed = toml::from_str::<ConfigToml>(cfg).expect("TOML deserialization should succeed");
+    assert_eq!(
+        parsed
+            .tui
+            .as_ref()
+            .and_then(|t| t.pet_status_animation_duration_seconds),
+        Some(120),
+    );
+}
+
+#[tokio::test]
+async fn runtime_config_resolves_pet_status_animation_duration() {
+    let cfg = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            tui: Some(Tui {
+                pet_status_animation_duration_seconds: Some(120),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load overridden config");
+
+    assert_eq!(
+        cfg.tui_pet_status_animation_duration,
+        Some(std::time::Duration::from_secs(120))
+    );
+
+    let cfg = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            tui: Some(Tui {
+                pet_status_animation_duration_seconds: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load overridden config");
+
+    assert_eq!(cfg.tui_pet_status_animation_duration, None);
+}
+
+#[test]
 fn tui_pet_anchor_deserializes_from_toml() {
     let cfg = r#"
 [tui]
@@ -3664,6 +3719,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             theme: None,
             pet: None,
             pet_anchor: TuiPetAnchor::Composer,
+            pet_status_animation_duration_seconds: None,
             session_picker_view: None,
             keymap: TuiKeymap::default(),
             model_availability_nux: ModelAvailabilityNuxConfig::default(),

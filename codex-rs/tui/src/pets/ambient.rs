@@ -30,7 +30,6 @@ use super::image_protocol::PetImageSupport;
 #[cfg(not(test))]
 use super::image_protocol::ProtocolSelection;
 use super::model::Animation;
-#[cfg(test)]
 use super::model::AnimationFrame;
 use super::model::Pet;
 
@@ -133,6 +132,7 @@ pub(crate) struct AmbientPet {
     notification: Option<PetNotification>,
     animation_started_at: Instant,
     animations_enabled: bool,
+    status_animation_duration: Option<Duration>,
 }
 
 impl AmbientPet {
@@ -148,6 +148,7 @@ impl AmbientPet {
         codex_home: &std::path::Path,
         frame_requester: FrameRequester,
         animations_enabled: bool,
+        status_animation_duration: Option<Duration>,
     ) -> Result<Self> {
         let pet = Pet::load_with_codex_home(
             selected_pet.unwrap_or(DEFAULT_PET_ID),
@@ -172,6 +173,7 @@ impl AmbientPet {
             notification: None,
             animation_started_at: Instant::now(),
             animations_enabled,
+            status_animation_duration,
         })
     }
 
@@ -204,11 +206,7 @@ impl AmbientPet {
             return None;
         }
 
-        current_animation_frame(
-            self.current_animation()?,
-            self.animation_started_at.elapsed(),
-        )?
-        .delay
+        self.current_animation_frame_tick()?.delay
     }
 
     /// Build an image draw request for the ambient pet anchored above the composer.
@@ -300,18 +298,30 @@ impl AmbientPet {
         Some(animation)
     }
 
+    fn current_animation_frame_tick(&self) -> Option<AnimationFrameTick> {
+        let animation = self.current_animation()?;
+        let elapsed = self.animation_started_at.elapsed();
+        if self.visible_notification(Instant::now()).is_some()
+            && let Some(status_animation_duration) = self.status_animation_duration
+        {
+            return status_animation_frame(animation, elapsed, status_animation_duration);
+        }
+        current_animation_frame(animation, elapsed)
+    }
+
     fn current_frame_path(&self) -> Option<PathBuf> {
-        let sprite_index = self
-            .current_animation()
-            .and_then(|animation| {
-                if self.animations_enabled {
-                    current_animation_frame(animation, self.animation_started_at.elapsed())
-                        .map(|frame| frame.sprite_index)
-                } else {
-                    animation.frames.first().map(|frame| frame.sprite_index)
-                }
-            })
-            .unwrap_or(0);
+        let Some(animation) = self.current_animation() else {
+            return self.frame_path_for_sprite_index(/*sprite_index*/ 0);
+        };
+        let sprite_index = if self.animations_enabled {
+            self.current_animation_frame_tick()
+                .map_or(0, |frame| frame.sprite_index)
+        } else {
+            animation
+                .frames
+                .first()
+                .map_or(0, |frame| frame.sprite_index)
+        };
         self.frame_path_for_sprite_index(sprite_index)
     }
 
@@ -411,9 +421,55 @@ fn current_animation_frame(animation: &Animation, elapsed: Duration) -> Option<A
     }
 }
 
+fn status_animation_frame(
+    animation: &Animation,
+    elapsed: Duration,
+    status_duration: Duration,
+) -> Option<AnimationFrameTick> {
+    if status_duration.is_zero() {
+        return current_animation_frame(animation, elapsed);
+    }
+
+    let Some(loop_start) = animation
+        .loop_start
+        .filter(|idx| *idx > 0 && *idx < animation.frames.len())
+    else {
+        return current_animation_frame(animation, elapsed);
+    };
+
+    let status_frames = &animation.frames[..loop_start];
+    let idle_frames = &animation.frames[loop_start..];
+    let status_nanos = frames_duration_nanos(status_frames);
+    let idle_nanos = frames_duration_nanos(idle_frames);
+    if status_nanos == 0 || idle_nanos == 0 {
+        return current_animation_frame(animation, elapsed);
+    }
+
+    let elapsed_nanos = elapsed.as_nanos();
+    let duration_nanos = status_duration.as_nanos();
+    if elapsed_nanos < duration_nanos {
+        let effective_elapsed = elapsed_nanos % status_nanos;
+        let mut tick = frame_at_elapsed_in_frames(status_frames, effective_elapsed)?;
+        if let Some(delay) = tick.delay.as_mut() {
+            *delay = (*delay).min(nanos_to_duration(duration_nanos - elapsed_nanos));
+        }
+        return Some(tick);
+    }
+
+    let idle_elapsed = elapsed_nanos.saturating_sub(duration_nanos) % idle_nanos;
+    frame_at_elapsed_in_frames(idle_frames, idle_elapsed)
+}
+
 fn frame_at_elapsed(animation: &Animation, elapsed_nanos: u128) -> Option<AnimationFrameTick> {
+    frame_at_elapsed_in_frames(&animation.frames, elapsed_nanos)
+}
+
+fn frame_at_elapsed_in_frames(
+    frames: &[AnimationFrame],
+    elapsed_nanos: u128,
+) -> Option<AnimationFrameTick> {
     let mut remaining_elapsed = elapsed_nanos;
-    for frame in &animation.frames {
+    for frame in frames {
         let frame_nanos = frame.duration.as_nanos().max(/*other*/ 1);
         if remaining_elapsed < frame_nanos {
             return Some(AnimationFrameTick {
@@ -425,9 +481,16 @@ fn frame_at_elapsed(animation: &Animation, elapsed_nanos: u128) -> Option<Animat
     }
 
     Some(AnimationFrameTick {
-        sprite_index: animation.frames.last()?.sprite_index,
+        sprite_index: frames.last()?.sprite_index,
         delay: None,
     })
+}
+
+fn frames_duration_nanos(frames: &[AnimationFrame]) -> u128 {
+    frames
+        .iter()
+        .map(|frame| frame.duration.as_nanos())
+        .sum::<u128>()
 }
 
 fn nanos_to_duration(nanos: u128) -> Duration {
@@ -469,6 +532,7 @@ pub(crate) fn test_ambient_pet(
             .checked_sub(Duration::from_millis(/*millis*/ 15))
             .unwrap(),
         animations_enabled,
+        status_animation_duration: None,
     }
 }
 
@@ -524,5 +588,50 @@ mod tests {
 
         assert_eq!(pet.current_frame_path(), Some(PathBuf::from("frame-0.png")));
         assert_eq!(pet.next_frame_delay(), None);
+    }
+
+    #[test]
+    fn status_animation_duration_repeats_status_frames_before_idle() {
+        let animation = Animation {
+            frames: vec![
+                AnimationFrame {
+                    sprite_index: 1,
+                    duration: Duration::from_millis(/*millis*/ 10),
+                },
+                AnimationFrame {
+                    sprite_index: 2,
+                    duration: Duration::from_millis(/*millis*/ 10),
+                },
+                AnimationFrame {
+                    sprite_index: 0,
+                    duration: Duration::from_millis(/*millis*/ 10),
+                },
+            ],
+            loop_start: Some(/*loop_start*/ 2),
+            fallback: "idle".to_string(),
+        };
+
+        assert_eq!(
+            status_animation_frame(
+                &animation,
+                Duration::from_millis(/*millis*/ 35),
+                Duration::from_millis(/*millis*/ 50),
+            ),
+            Some(AnimationFrameTick {
+                sprite_index: 2,
+                delay: Some(Duration::from_millis(/*millis*/ 5)),
+            })
+        );
+        assert_eq!(
+            status_animation_frame(
+                &animation,
+                Duration::from_millis(/*millis*/ 55),
+                Duration::from_millis(/*millis*/ 50),
+            ),
+            Some(AnimationFrameTick {
+                sprite_index: 0,
+                delay: Some(Duration::from_millis(/*millis*/ 5)),
+            })
+        );
     }
 }

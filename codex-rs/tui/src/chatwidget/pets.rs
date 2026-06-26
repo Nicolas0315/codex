@@ -17,6 +17,7 @@ pub(super) fn load_ambient_pet(
         &config.codex_home,
         frame_requester,
         config.animations,
+        config.tui_pet_status_animation_duration,
     )
     .ok()
 }
@@ -36,6 +37,7 @@ pub(super) fn start_configured_pet_load_if_needed(
 
     let codex_home = config.codex_home.clone();
     let animations_enabled = config.animations;
+    let status_animation_duration = config.tui_pet_status_animation_duration;
     spawn_pet_load(move || {
         let result = crate::pets::ensure_builtin_pack_for_pet(&pet_id, &codex_home)
             .and_then(|()| {
@@ -44,6 +46,7 @@ pub(super) fn start_configured_pet_load_if_needed(
                     &codex_home,
                     frame_requester,
                     animations_enabled,
+                    status_animation_duration,
                 )
             })
             .map(Some)
@@ -242,6 +245,7 @@ impl ChatWidget {
                         &codex_home,
                         frame_requester,
                         /*animations_enabled*/ false,
+                        /*status_animation_duration*/ None,
                     )
                 })
                 .map_err(|err| err.to_string());

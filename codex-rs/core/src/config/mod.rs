@@ -781,6 +781,9 @@ pub struct Config {
     /// Vertical anchor used by terminal pet rendering.
     pub tui_pet_anchor: TuiPetAnchor,
 
+    /// Duration used by terminal pet status animations before they return to idle.
+    pub tui_pet_status_animation_duration: Option<std::time::Duration>,
+
     /// Preferred layout for resume/fork session picker results.
     pub tui_session_picker_view: SessionPickerViewMode,
 
@@ -3975,6 +3978,12 @@ impl Config {
                 .as_ref()
                 .map(|t| t.pet_anchor)
                 .unwrap_or_default(),
+            tui_pet_status_animation_duration: cfg
+                .tui
+                .as_ref()
+                .and_then(|t| t.pet_status_animation_duration_seconds)
+                .filter(|seconds| *seconds > 0)
+                .map(std::time::Duration::from_secs),
             tui_session_picker_view: cfg
                 .tui
                 .as_ref()

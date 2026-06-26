@@ -754,6 +754,13 @@ pub struct Tui {
     #[serde(default)]
     pub pet_anchor: TuiPetAnchor,
 
+    /// How long status animations should keep playing before returning to idle, in seconds.
+    ///
+    /// Omit or set to `0` to keep the built-in default status animation timing.
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub pet_status_animation_duration_seconds: Option<u64>,
+
     /// Preferred layout for resume/fork session picker results.
     #[serde(default)]
     pub session_picker_view: Option<SessionPickerViewMode>,

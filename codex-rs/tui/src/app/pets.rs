@@ -81,6 +81,7 @@ impl App {
         let codex_home = self.config.codex_home.clone();
         let frame_requester = tui.frame_requester();
         let animations_enabled = self.config.animations;
+        let status_animation_duration = self.config.tui_pet_status_animation_duration;
         let tx = self.app_event_tx.clone();
         std::mem::drop(tokio::task::spawn_blocking(move || {
             let result = crate::pets::ensure_builtin_pack_for_pet(&pet_id, &codex_home)
@@ -90,6 +91,7 @@ impl App {
                         &codex_home,
                         frame_requester,
                         animations_enabled,
+                        status_animation_duration,
                     )
                 })
                 .map(Some)
