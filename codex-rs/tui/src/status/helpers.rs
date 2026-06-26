@@ -10,6 +10,31 @@ use codex_utils_path_uri::PathUri;
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TimeFormatPreference {
+    TwelveHour,
+    TwentyFourHour,
+}
+
+impl TimeFormatPreference {
+    fn detect() -> Self {
+        #[cfg(test)]
+        {
+            Self::TwentyFourHour
+        }
+
+        #[cfg(all(windows, not(test)))]
+        {
+            windows_time_format_preference().unwrap_or(Self::TwentyFourHour)
+        }
+
+        #[cfg(all(not(windows), not(test)))]
+        {
+            Self::TwentyFourHour
+        }
+    }
+}
+
 fn normalize_agents_display_path(path: &Path) -> String {
     dunce::simplified(path).display().to_string()
 }
@@ -173,12 +198,85 @@ pub(crate) fn format_directory_display(directory: &Path, max_width: Option<usize
 }
 
 pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
-    let time = dt.format("%H:%M").to_string();
+    format_reset_timestamp_with_preference(dt, captured_at, TimeFormatPreference::detect())
+}
+
+fn format_reset_timestamp_with_preference(
+    dt: DateTime<Local>,
+    captured_at: DateTime<Local>,
+    preference: TimeFormatPreference,
+) -> String {
+    let time = format_reset_time(dt, preference);
     if dt.date_naive() == captured_at.date_naive() {
         time
     } else {
         format!("{time} on {}", dt.format("%-d %b"))
     }
+}
+
+fn format_reset_time(dt: DateTime<Local>, preference: TimeFormatPreference) -> String {
+    match preference {
+        TimeFormatPreference::TwelveHour => dt.format("%-I:%M %p").to_string(),
+        TimeFormatPreference::TwentyFourHour => dt.format("%H:%M").to_string(),
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+fn windows_time_format_preference() -> Option<TimeFormatPreference> {
+    use std::ptr;
+    use windows_sys::Win32::Globalization::GetLocaleInfoEx;
+    use windows_sys::Win32::Globalization::LOCALE_STIMEFORMAT;
+
+    let required_len =
+        unsafe { GetLocaleInfoEx(ptr::null(), LOCALE_STIMEFORMAT, ptr::null_mut(), 0) };
+    if required_len <= 1 {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; required_len as usize];
+    let written = unsafe {
+        GetLocaleInfoEx(
+            ptr::null(),
+            LOCALE_STIMEFORMAT,
+            buffer.as_mut_ptr(),
+            required_len,
+        )
+    };
+    if written <= 1 {
+        return None;
+    }
+
+    let nul_index = (written as usize).saturating_sub(1);
+    let pattern = String::from_utf16_lossy(&buffer[..nul_index]);
+    time_pattern_preference(&pattern)
+}
+
+#[cfg(any(windows, test))]
+fn time_pattern_preference(pattern: &str) -> Option<TimeFormatPreference> {
+    let mut chars = pattern.chars().peekable();
+    let mut in_quoted_literal = false;
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+            } else {
+                in_quoted_literal = !in_quoted_literal;
+            }
+            continue;
+        }
+
+        if in_quoted_literal {
+            continue;
+        }
+
+        match ch {
+            'h' => return Some(TimeFormatPreference::TwelveHour),
+            'H' => return Some(TimeFormatPreference::TwentyFourHour),
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn title_case(s: &str) -> String {
@@ -197,6 +295,7 @@ fn title_case(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;
+    use chrono::TimeZone;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
@@ -230,6 +329,102 @@ mod tests {
         for (plan_type, expected) in cases {
             assert_eq!(plan_type_display_name(plan_type), expected);
         }
+    }
+
+    #[test]
+    fn reset_timestamp_formats_24_hour_time_by_default() {
+        let captured_at = Local
+            .with_ymd_and_hms(2024, 5, 6, 7, 8, 9)
+            .single()
+            .expect("timestamp");
+        let reset_at = Local
+            .with_ymd_and_hms(2024, 5, 6, 18, 49, 0)
+            .single()
+            .expect("timestamp");
+
+        assert_eq!(format_reset_timestamp(reset_at, captured_at), "18:49");
+    }
+
+    #[test]
+    fn reset_timestamp_can_format_12_hour_time() {
+        let captured_at = Local
+            .with_ymd_and_hms(2024, 5, 6, 7, 8, 9)
+            .single()
+            .expect("timestamp");
+        let same_day_reset = Local
+            .with_ymd_and_hms(2024, 5, 6, 18, 49, 0)
+            .single()
+            .expect("timestamp");
+        let next_day_reset = Local
+            .with_ymd_and_hms(2024, 5, 7, 18, 49, 0)
+            .single()
+            .expect("timestamp");
+
+        assert_eq!(
+            format_reset_timestamp_with_preference(
+                same_day_reset,
+                captured_at,
+                TimeFormatPreference::TwelveHour
+            ),
+            "6:49 PM"
+        );
+        assert_eq!(
+            format_reset_timestamp_with_preference(
+                next_day_reset,
+                captured_at,
+                TimeFormatPreference::TwelveHour
+            ),
+            "6:49 PM on 7 May"
+        );
+    }
+
+    #[test]
+    fn reset_timestamp_uses_12_hour_midnight_and_noon_labels() {
+        let captured_at = Local
+            .with_ymd_and_hms(2024, 5, 6, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let midnight = Local
+            .with_ymd_and_hms(2024, 5, 6, 0, 5, 0)
+            .single()
+            .expect("timestamp");
+        let noon = Local
+            .with_ymd_and_hms(2024, 5, 6, 12, 5, 0)
+            .single()
+            .expect("timestamp");
+
+        assert_eq!(
+            format_reset_timestamp_with_preference(
+                midnight,
+                captured_at,
+                TimeFormatPreference::TwelveHour
+            ),
+            "12:05 AM"
+        );
+        assert_eq!(
+            format_reset_timestamp_with_preference(
+                noon,
+                captured_at,
+                TimeFormatPreference::TwelveHour
+            ),
+            "12:05 PM"
+        );
+    }
+
+    #[test]
+    fn detects_hour_cycle_from_windows_time_patterns() {
+        assert_eq!(
+            time_pattern_preference("h:mm tt"),
+            Some(TimeFormatPreference::TwelveHour)
+        );
+        assert_eq!(
+            time_pattern_preference("HH:mm"),
+            Some(TimeFormatPreference::TwentyFourHour)
+        );
+        assert_eq!(
+            time_pattern_preference("'h' HH:mm"),
+            Some(TimeFormatPreference::TwentyFourHour)
+        );
     }
 
     #[tokio::test]
