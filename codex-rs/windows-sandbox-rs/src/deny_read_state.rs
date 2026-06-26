@@ -9,8 +9,10 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use tempfile::NamedTempFile;
 
 const DENY_READ_ACL_STATE_FILE: &str = "deny_read_acl_state.json";
 
@@ -69,8 +71,10 @@ pub unsafe fn sync_persistent_deny_read_acls(
 
 fn load_state(path: &Path) -> Result<PersistentDenyReadAclState> {
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse deny-read ACL state {}", path.display())),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(state) => Ok(state),
+            Err(_) => Ok(PersistentDenyReadAclState::default()),
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             Ok(PersistentDenyReadAclState::default())
         }
@@ -82,6 +86,64 @@ fn load_state(path: &Path) -> Result<PersistentDenyReadAclState> {
 
 fn store_state(path: &Path, state: &PersistentDenyReadAclState) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(state).context("serialize deny-read ACL state")?;
-    std::fs::write(path, bytes)
-        .with_context(|| format!("write deny-read ACL state {}", path.display()))
+    let parent = path
+        .parent()
+        .with_context(|| format!("deny-read ACL state has no parent {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create deny-read ACL state dir {}", parent.display()))?;
+    let mut temp = NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "create temporary deny-read ACL state in {}",
+            parent.display()
+        )
+    })?;
+    temp.write_all(&bytes).with_context(|| {
+        format!(
+            "write temporary deny-read ACL state {}",
+            temp.path().display()
+        )
+    })?;
+    temp.as_file_mut()
+        .sync_all()
+        .context("flush temporary deny-read ACL state")?;
+    temp.persist(path)
+        .map(|_| ())
+        .with_context(|| format!("replace deny-read ACL state {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_state_recovers_from_nul_filled_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let path = temp_dir.path().join(DENY_READ_ACL_STATE_FILE);
+        std::fs::write(&path, vec![0_u8; 32])?;
+
+        let state = load_state(&path)?;
+
+        assert!(state.principals.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn store_state_replaces_corrupt_file_with_valid_json() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let path = temp_dir.path().join(DENY_READ_ACL_STATE_FILE);
+        std::fs::write(&path, vec![0_u8; 32])?;
+        let mut state = PersistentDenyReadAclState::default();
+        state.principals.insert(
+            "S-1-5-21-123-456-789-1001".to_string(),
+            vec![PathBuf::from(r"C:\Users\example\secret")],
+        );
+
+        store_state(&path, &state)?;
+
+        let loaded = load_state(&path)?;
+        assert_eq!(loaded.principals, state.principals);
+        Ok(())
+    }
 }
