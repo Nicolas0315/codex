@@ -1295,6 +1295,96 @@ async fn turn_start_rejects_invalid_permission_selection_before_starting_turn() 
 }
 
 #[tokio::test]
+async fn turn_start_accepts_requirements_profile_with_network_enabled() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        "never",
+        &BTreeMap::from([(Feature::NetworkProxy, true)]),
+    )?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        r#"
+default_permissions = "github_only"
+
+[allowed_permission_profiles]
+github_only = true
+":read-only" = true
+
+[permissions.github_only]
+extends = ":read-only"
+
+[permissions.github_only.network]
+enabled = true
+allow_local_binding = false
+
+[permissions.github_only.network.domains]
+"github.com" = "allow"
+"api.github.com" = "allow"
+"raw.githubusercontent.com" = "allow"
+"objects.githubusercontent.com" = "allow"
+"githubusercontent.com" = "allow"
+"#,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse {
+        thread,
+        active_permission_profile,
+        ..
+    } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let active_permission_profile =
+        active_permission_profile.context("expected active permission profile")?;
+    assert_eq!(active_permission_profile.id, "github_only");
+    assert_eq!(
+        active_permission_profile.extends.as_deref(),
+        Some(":read-only")
+    );
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            client_user_message_id: None,
+            input: vec![V2UserInput::Text {
+                text: "use the managed network profile".to_string(),
+                text_elements: Vec::new(),
+            }],
+            permissions: Some("github_only".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn turn_start_rejects_unknown_environment_before_starting_turn() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;

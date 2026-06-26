@@ -3275,8 +3275,8 @@ impl Config {
                 // when doing so would lose roots, network, or tmp settings.
                 None
             } else {
-                let selected_profile_extends = cfg
-                    .permissions
+                let selected_profile_extends = effective_permission_selection
+                    .profiles
                     .as_ref()
                     .and_then(|permissions| permissions.entries.get(default_permissions))
                     .and_then(|profile| profile.extends.clone());
@@ -4084,8 +4084,12 @@ impl Config {
                         ),
                     )
                 })?;
-            let mut configured_network_proxy_config = network_proxy_config_for_profile_selection(
+            let permissions = merge_managed_permission_profiles(
                 cfg.permissions.as_ref(),
+                self.config_layer_stack.requirements_toml(),
+            )?;
+            let mut configured_network_proxy_config = network_proxy_config_for_profile_selection(
+                permissions.as_ref(),
                 active_permission_profile.id.as_str(),
             )?;
             if self.features.enabled(Feature::NetworkProxy)
