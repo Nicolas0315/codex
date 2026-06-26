@@ -596,6 +596,7 @@ impl RemoteControlWebsocket {
             return true;
         };
 
+        let mut last_auth_error_log_key = None;
         loop {
             if !matches!(
                 *self.desired_state_rx.borrow(),
@@ -604,12 +605,20 @@ impl RemoteControlWebsocket {
                 return true;
             }
             let auth = match load_remote_control_auth(&self.auth_manager).await {
-                Ok(auth) => auth,
+                Ok(auth) => {
+                    last_auth_error_log_key = None;
+                    auth
+                }
                 Err(err) => {
-                    info!(
-                        error = %err,
-                        "waiting to resolve remote control preference until authentication is available"
-                    );
+                    if Self::should_log_preference_resolution_auth_error(
+                        &mut last_auth_error_log_key,
+                        &err,
+                    ) {
+                        info!(
+                            error = %err,
+                            "waiting to resolve remote control preference until authentication is available"
+                        );
+                    }
                     if !self.wait_for_preference_resolution_retry().await {
                         return false;
                     }
@@ -640,6 +649,18 @@ impl RemoteControlWebsocket {
             self.transition_unknown_to(desired_state);
             return true;
         }
+    }
+
+    fn should_log_preference_resolution_auth_error(
+        last_error: &mut Option<(ErrorKind, String)>,
+        err: &io::Error,
+    ) -> bool {
+        let error_key = (err.kind(), err.to_string());
+        if last_error.as_ref() == Some(&error_key) {
+            return false;
+        }
+        *last_error = Some(error_key);
+        true
     }
 
     fn transition_unknown_to(&self, desired_state: RemoteControlDesiredState) {
@@ -1888,6 +1909,53 @@ mod tests {
         assert!(reconnect_delay <= Duration::from_millis(220));
         assert!(!reconnect_backoff_reset);
         assert_eq!(reconnect_attempt, 1);
+    }
+
+    #[test]
+    fn repeated_preference_resolution_auth_errors_log_once_until_error_changes() {
+        const API_KEY_ERROR: &str =
+            "remote control requires ChatGPT authentication; API key auth is not supported";
+        const MISSING_ACCOUNT_ERROR: &str =
+            "remote control enrollment is waiting for a ChatGPT account id";
+
+        fn auth_error(kind: ErrorKind, message: &'static str) -> io::Error {
+            io::Error::new(kind, message)
+        }
+
+        let mut last_error = None;
+
+        assert!(
+            RemoteControlWebsocket::should_log_preference_resolution_auth_error(
+                &mut last_error,
+                &auth_error(ErrorKind::PermissionDenied, API_KEY_ERROR)
+            )
+        );
+        assert!(
+            !RemoteControlWebsocket::should_log_preference_resolution_auth_error(
+                &mut last_error,
+                &auth_error(ErrorKind::PermissionDenied, API_KEY_ERROR)
+            )
+        );
+
+        assert!(
+            RemoteControlWebsocket::should_log_preference_resolution_auth_error(
+                &mut last_error,
+                &auth_error(ErrorKind::WouldBlock, MISSING_ACCOUNT_ERROR)
+            )
+        );
+        assert!(
+            !RemoteControlWebsocket::should_log_preference_resolution_auth_error(
+                &mut last_error,
+                &auth_error(ErrorKind::WouldBlock, MISSING_ACCOUNT_ERROR)
+            )
+        );
+
+        assert!(
+            RemoteControlWebsocket::should_log_preference_resolution_auth_error(
+                &mut last_error,
+                &auth_error(ErrorKind::PermissionDenied, API_KEY_ERROR)
+            )
+        );
     }
 
     #[test]
