@@ -402,6 +402,12 @@ impl McpConnectionManager {
             .map(|metadata| metadata.environment_id.as_str())
     }
 
+    pub fn server_stdio_command(&self, server_name: &str) -> Option<&str> {
+        self.server_metadata
+            .get(server_name)
+            .and_then(|metadata| metadata.stdio_command.as_deref())
+    }
+
     pub fn server_pollutes_memory(&self, server_name: &str) -> bool {
         self.server_metadata
             .get(server_name)

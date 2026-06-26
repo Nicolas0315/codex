@@ -78,6 +78,7 @@ pub(crate) struct McpServerMetadata {
     pub environment_id: String,
     pub pollutes_memory: bool,
     pub origin: Option<McpServerOrigin>,
+    pub stdio_command: Option<String>,
     pub supports_parallel_tool_calls: bool,
     pub default_tools_approval_mode: Option<AppToolApproval>,
     pub tool_approval_modes: HashMap<String, AppToolApproval>,
@@ -100,6 +101,10 @@ impl From<&EffectiveMcpServer> for McpServerMetadata {
                 environment_id: config.environment_id.clone(),
                 pollutes_memory: true,
                 origin: McpServerOrigin::from_transport(&config.transport),
+                stdio_command: match &config.transport {
+                    McpServerTransportConfig::Stdio { command, .. } => Some(command.clone()),
+                    McpServerTransportConfig::StreamableHttp { .. } => None,
+                },
                 supports_parallel_tool_calls: config.supports_parallel_tool_calls,
                 default_tools_approval_mode: config.default_tools_approval_mode,
                 tool_approval_modes: config

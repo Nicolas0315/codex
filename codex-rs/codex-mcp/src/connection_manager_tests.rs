@@ -1373,6 +1373,7 @@ async fn list_all_tools_adds_server_metadata_to_tools() {
             origin: Some(McpServerOrigin::StreamableHttp(
                 "https://docs.example".to_string(),
             )),
+            stdio_command: None,
             supports_parallel_tool_calls: true,
             default_tools_approval_mode: None,
             tool_approval_modes: HashMap::new(),

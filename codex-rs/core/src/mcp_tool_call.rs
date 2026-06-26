@@ -78,6 +78,8 @@ use codex_rollout::state_db;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
+use codex_utils_path::is_wsl;
+use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use rmcp::model::ToolAnnotations;
@@ -727,7 +729,11 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
     let server_environment_id = manager
         .server_environment_id(server)
         .unwrap_or(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID);
-    let Some(sandbox_cwd) = sandbox_cwd_for_mcp_server(step_context, server_environment_id) else {
+    let Some(sandbox_cwd) = sandbox_cwd_for_mcp_server(
+        step_context,
+        server_environment_id,
+        manager.server_stdio_command(server),
+    ) else {
         return Ok(meta);
     };
     let permission_profile = turn_context.permission_profile();
@@ -759,22 +765,143 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
     Ok(meta)
 }
 
-fn sandbox_cwd_for_mcp_server(step_context: &StepContext, environment_id: &str) -> Option<PathUri> {
-    if let Some(environment) = step_context
+fn sandbox_cwd_for_mcp_server(
+    step_context: &StepContext,
+    environment_id: &str,
+    server_stdio_command: Option<&str>,
+) -> Option<PathUri> {
+    let sandbox_cwd = if let Some(environment) = step_context
         .environments
         .turn_environments
         .iter()
         .find(|environment| environment.environment_id == environment_id)
     {
-        return Some(environment.cwd().clone());
-    }
-
-    if environment_id == codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID {
+        Some(environment.cwd().clone())
+    } else if environment_id == codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID {
         #[allow(deprecated)]
-        return Some(PathUri::from_abs_path(&step_context.turn.cwd));
+        Some(PathUri::from_abs_path(&step_context.turn.cwd))
+    } else {
+        None
+    }?;
+
+    Some(sandbox_cwd_for_stdio_server_runtime(
+        sandbox_cwd,
+        server_stdio_command,
+    ))
+}
+
+fn sandbox_cwd_for_stdio_server_runtime(
+    sandbox_cwd: PathUri,
+    server_stdio_command: Option<&str>,
+) -> PathUri {
+    let distro_name = std::env::var("WSL_DISTRO_NAME").ok();
+    sandbox_cwd_for_stdio_server_runtime_with_wsl_context(
+        sandbox_cwd,
+        server_stdio_command,
+        is_wsl(),
+        distro_name.as_deref(),
+    )
+}
+
+fn sandbox_cwd_for_stdio_server_runtime_with_wsl_context(
+    sandbox_cwd: PathUri,
+    server_stdio_command: Option<&str>,
+    is_wsl: bool,
+    wsl_distro_name: Option<&str>,
+) -> PathUri {
+    if !is_wsl || !stdio_command_is_windows_exe_from_wsl(server_stdio_command) {
+        return sandbox_cwd;
     }
 
-    None
+    wsl_path_uri_to_windows_file_uri(&sandbox_cwd, wsl_distro_name).unwrap_or(sandbox_cwd)
+}
+
+fn stdio_command_is_windows_exe_from_wsl(command: Option<&str>) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+    let command = command.trim_matches(|ch| ch == '"' || ch == '\'');
+    if !command
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe"))
+    {
+        return false;
+    }
+
+    is_wsl_mounted_windows_path(command) || has_windows_drive_prefix(command)
+}
+
+fn wsl_path_uri_to_windows_file_uri(cwd: &PathUri, distro_name: Option<&str>) -> Option<PathUri> {
+    if cwd.infer_path_convention() != Some(PathConvention::Posix) {
+        return None;
+    }
+
+    let path = cwd.inferred_native_path_string();
+    wsl_mounted_drive_path_to_windows_file_uri(&path)
+        .or_else(|| wsl_posix_path_to_unc_file_uri(&path, distro_name))
+}
+
+fn wsl_mounted_drive_path_to_windows_file_uri(path: &str) -> Option<PathUri> {
+    let path = path.strip_prefix("/mnt/")?;
+    let (drive, rest) = path.split_once('/').unwrap_or((path, ""));
+    if drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+
+    let drive = drive.to_ascii_uppercase();
+    let mut url = url::Url::parse("file:///").ok()?;
+    {
+        let mut segments = url.path_segments_mut().ok()?;
+        segments.clear();
+        segments.push(&format!("{drive}:"));
+        for segment in rest.split('/').filter(|segment| !segment.is_empty()) {
+            segments.push(segment);
+        }
+    }
+    PathUri::try_from(url).ok()
+}
+
+fn wsl_posix_path_to_unc_file_uri(path: &str, distro_name: Option<&str>) -> Option<PathUri> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let distro_name = distro_name?.trim();
+    if distro_name.is_empty() || distro_name.contains(['/', '\\']) {
+        return None;
+    }
+
+    let mut url = url::Url::parse("file://wsl.localhost/").ok()?;
+    {
+        let mut segments = url.path_segments_mut().ok()?;
+        segments.clear();
+        segments.push(distro_name);
+        for segment in path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+        {
+            segments.push(segment);
+        }
+    }
+    PathUri::try_from(url).ok()
+}
+
+fn is_wsl_mounted_windows_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let Some(path) = path.strip_prefix("/mnt/") else {
+        return false;
+    };
+    let drive = path.split('/').next().unwrap_or(path);
+    drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 async fn maybe_mark_thread_memory_mode_polluted(

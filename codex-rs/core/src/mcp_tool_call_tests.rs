@@ -1152,7 +1152,7 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
         ));
 
     let step_context = StepContext::for_test(Arc::new(turn_context));
-    let sandbox_cwd = sandbox_cwd_for_mcp_server(&step_context, "remote");
+    let sandbox_cwd = sandbox_cwd_for_mcp_server(&step_context, "remote", None);
 
     assert_eq!(sandbox_cwd, Some(secondary_cwd));
     Ok(())
@@ -1163,9 +1163,68 @@ async fn mcp_sandbox_cwd_is_none_for_unselected_server_environment() -> anyhow::
     let (_, turn_context) = make_session_and_context().await;
 
     let step_context = StepContext::for_test(Arc::new(turn_context));
-    let sandbox_cwd = sandbox_cwd_for_mcp_server(&step_context, "remote");
+    let sandbox_cwd = sandbox_cwd_for_mcp_server(&step_context, "remote", None);
 
     assert_eq!(sandbox_cwd, None);
+    Ok(())
+}
+
+#[test]
+fn wsl_windows_stdio_mcp_sandbox_cwd_maps_mounted_drive_uri() -> anyhow::Result<()> {
+    let sandbox_cwd = PathUri::parse("file:///mnt/c/Users/Alice%20Smith/project")?;
+    let mapped = sandbox_cwd_for_stdio_server_runtime_with_wsl_context(
+        sandbox_cwd,
+        Some("/mnt/c/Users/Alice/AppData/Local/OpenAI/Codex/bin/node_repl.exe"),
+        /*is_wsl*/ true,
+        Some("Ubuntu"),
+    );
+
+    assert_eq!(mapped.to_string(), "file:///C:/Users/Alice%20Smith/project");
+    Ok(())
+}
+
+#[test]
+fn wsl_windows_stdio_mcp_sandbox_cwd_maps_wsl_filesystem_uri_to_unc() -> anyhow::Result<()> {
+    let sandbox_cwd = PathUri::parse("file:///home/alice/my%20repo")?;
+    let mapped = sandbox_cwd_for_stdio_server_runtime_with_wsl_context(
+        sandbox_cwd,
+        Some("/mnt/c/Users/Alice/AppData/Local/OpenAI/Codex/bin/node_repl.exe"),
+        /*is_wsl*/ true,
+        Some("Ubuntu-22.04"),
+    );
+
+    assert_eq!(
+        mapped.to_string(),
+        "file://wsl.localhost/Ubuntu-22.04/home/alice/my%20repo"
+    );
+    Ok(())
+}
+
+#[test]
+fn wsl_windows_stdio_mcp_sandbox_cwd_ignores_non_windows_commands() -> anyhow::Result<()> {
+    let sandbox_cwd = PathUri::parse("file:///home/alice/project")?;
+    let mapped = sandbox_cwd_for_stdio_server_runtime_with_wsl_context(
+        sandbox_cwd.clone(),
+        Some("/usr/bin/node"),
+        /*is_wsl*/ true,
+        Some("Ubuntu"),
+    );
+
+    assert_eq!(mapped, sandbox_cwd);
+    Ok(())
+}
+
+#[test]
+fn wsl_windows_stdio_mcp_sandbox_cwd_ignores_non_wsl_hosts() -> anyhow::Result<()> {
+    let sandbox_cwd = PathUri::parse("file:///mnt/c/Users/Alice/project")?;
+    let mapped = sandbox_cwd_for_stdio_server_runtime_with_wsl_context(
+        sandbox_cwd.clone(),
+        Some("/mnt/c/Users/Alice/AppData/Local/OpenAI/Codex/bin/node_repl.exe"),
+        /*is_wsl*/ false,
+        Some("Ubuntu"),
+    );
+
+    assert_eq!(mapped, sandbox_cwd);
     Ok(())
 }
 
