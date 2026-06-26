@@ -12,6 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TimeFormatPreference {
+    // Constructed only by Windows runtime detection and cross-platform tests.
+    #[allow(dead_code)]
     TwelveHour,
     TwentyFourHour,
 }
