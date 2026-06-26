@@ -104,6 +104,10 @@ pub fn is_sqlite_corruption_error(err: &anyhow::Error) -> bool {
     err.chain().any(sqlite_error_source_is_corruption)
 }
 
+pub(crate) fn is_sqlite_lock_error(err: &anyhow::Error) -> bool {
+    err.chain().any(sqlite_error_source_is_lock)
+}
+
 fn sqlite_error_source_is_corruption(source: &(dyn std::error::Error + 'static)) -> bool {
     let Some(err) = source.downcast_ref::<sqlx::Error>() else {
         return false;
@@ -117,11 +121,34 @@ fn sqlite_error_source_is_corruption(source: &(dyn std::error::Error + 'static))
             .is_some_and(sqlite_database_code_is_corruption)
 }
 
+fn sqlite_error_source_is_lock(source: &(dyn std::error::Error + 'static)) -> bool {
+    let Some(err) = source.downcast_ref::<sqlx::Error>() else {
+        return false;
+    };
+    let sqlx::Error::Database(database_error) = err else {
+        return false;
+    };
+    sqlite_error_detail_is_lock(database_error.message())
+        || database_error
+            .code()
+            .is_some_and(sqlite_database_code_is_lock)
+}
+
 fn sqlite_database_code_is_corruption(code: Cow<'_, str>) -> bool {
     matches!(
         code.as_ref().to_ascii_lowercase().as_str(),
         "11" | "26" | "sqlite_corrupt" | "sqlite_notadb"
     )
+}
+
+fn sqlite_database_code_is_lock(code: Cow<'_, str>) -> bool {
+    let code = code.as_ref().to_ascii_lowercase();
+    if matches!(code.as_str(), "5" | "6" | "sqlite_busy" | "sqlite_locked") {
+        return true;
+    }
+    code.parse::<i32>()
+        .ok()
+        .is_some_and(|code| matches!(code & 0xff, 5 | 6))
 }
 
 pub fn sqlite_error_detail_is_corruption(detail: &str) -> bool {

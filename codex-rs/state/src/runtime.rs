@@ -209,7 +209,12 @@ impl StateRuntime {
                 return Err(err);
             }
         };
-        let logs_pool = match open_logs_sqlite(&logs_path, &logs_migrator, telemetry_override).await
+        let logs_pool = match open_logs_sqlite_with_lock_fallback(
+            &logs_path,
+            &logs_migrator,
+            telemetry_override,
+        )
+        .await
         {
             Ok(db) => Arc::new(db),
             Err(err) => {
@@ -388,6 +393,85 @@ async fn open_logs_sqlite(
     open_sqlite(path, migrator, LOGS_DB, telemetry_override).await
 }
 
+async fn open_logs_sqlite_with_lock_fallback(
+    path: &Path,
+    migrator: &Migrator,
+    telemetry_override: Option<&dyn DbTelemetry>,
+) -> anyhow::Result<SqlitePool> {
+    let err = match open_logs_sqlite(path, migrator, telemetry_override).await {
+        Ok(pool) => return Ok(pool),
+        Err(err) if recovery::is_sqlite_lock_error(&err) => err,
+        Err(err) => return Err(err),
+    };
+
+    warn!(
+        "logs db at {} is locked; using an in-memory logs db for this process: {err}",
+        path.display()
+    );
+    crate::telemetry::record_fallback("state_runtime_logs_db", "locked", telemetry_override);
+
+    match open_ephemeral_logs_sqlite(migrator, telemetry_override).await {
+        Ok(pool) => Ok(pool),
+        Err(fallback_err) => Err(anyhow::anyhow!(
+            "failed to open locked logs db at {}: {err}; also failed to open in-memory logs db: {fallback_err:#}",
+            path.display(),
+        )),
+    }
+}
+
+async fn open_ephemeral_logs_sqlite(
+    migrator: &Migrator,
+    telemetry_override: Option<&dyn DbTelemetry>,
+) -> anyhow::Result<SqlitePool> {
+    let memory_path = Path::new(":memory:");
+    let options = SqliteConnectOptions::new()
+        .in_memory(true)
+        .journal_mode(SqliteJournalMode::Memory)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .log_statements(LevelFilter::Off);
+    let started = Instant::now();
+    let pool_result = SqlitePoolOptions::new()
+        // SQLite in-memory databases are per-connection by default, so keep
+        // the fallback pool to one connection to preserve migrated schema.
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(anyhow::Error::from);
+    crate::telemetry::record_init_result(
+        telemetry_override,
+        DbKind::Logs,
+        "open_logs_ephemeral",
+        started.elapsed(),
+        &pool_result,
+    );
+    let pool = pool_result.map_err(|source| {
+        recovery::RuntimeDbInitError::new(LOGS_DB.label, "open ephemeral", memory_path, source)
+    })?;
+
+    let started = Instant::now();
+    let migrate_result = migrator.run(&pool).await.map_err(anyhow::Error::from);
+    crate::telemetry::record_init_result(
+        telemetry_override,
+        DbKind::Logs,
+        "migrate_logs_ephemeral",
+        started.elapsed(),
+        &migrate_result,
+    );
+    if let Err(source) = migrate_result {
+        pool.close().await;
+        return Err(recovery::RuntimeDbInitError::new(
+            LOGS_DB.label,
+            "migrate ephemeral",
+            memory_path,
+            source,
+        )
+        .into());
+    }
+
+    Ok(pool)
+}
+
 async fn open_goals_sqlite(
     path: &Path,
     migrator: &Migrator,
@@ -539,17 +623,25 @@ pub async fn sqlite_integrity_check(path: &Path) -> anyhow::Result<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::StateRuntime;
+    use super::base_sqlite_options;
+    use super::logs_db_path;
     use super::open_state_sqlite;
     use super::runtime_state_migrator;
     use super::sqlite_integrity_check;
     use super::state_db_path;
     use super::test_support::unique_temp_dir;
+    use crate::DB_FALLBACK_METRIC;
     use crate::DB_INIT_METRIC;
     use crate::DbTelemetry;
+    use crate::LogEntry;
+    use crate::LogQuery;
     use crate::migrations::STATE_MIGRATOR;
     use pretty_assertions::assert_eq;
+    use sqlx::Connection;
+    use sqlx::SqliteConnection;
     use sqlx::SqlitePool;
     use sqlx::migrate::MigrateError;
+    use sqlx::sqlite::SqliteAutoVacuum;
     use sqlx::sqlite::SqliteConnectOptions;
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
@@ -736,6 +828,79 @@ mod tests {
 
         runtime.pool.close().await;
         runtime.logs_pool.close().await;
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn init_uses_ephemeral_logs_db_when_disk_logs_db_is_locked() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let logs_path = logs_db_path(codex_home.as_path());
+        let lock_options =
+            base_sqlite_options(logs_path.as_path()).auto_vacuum(SqliteAutoVacuum::Incremental);
+        let mut lock_conn = SqliteConnection::connect_with(&lock_options)
+            .await
+            .expect("open logs lock connection");
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut lock_conn)
+            .await
+            .expect("hold exclusive logs db lock");
+        let telemetry = TestTelemetry::default();
+
+        let runtime = StateRuntime::init_with_telemetry_for_tests(
+            codex_home.clone(),
+            "test-provider".to_string(),
+            &telemetry,
+        )
+        .await
+        .expect("state runtime should initialize with an ephemeral logs db");
+
+        let fallback_events = telemetry
+            .counters()
+            .into_iter()
+            .filter(|event| event.name == DB_FALLBACK_METRIC)
+            .collect::<Vec<_>>();
+        assert_eq!(fallback_events.len(), 1);
+        assert_eq!(
+            fallback_events[0].tags.get("caller").map(String::as_str),
+            Some("state_runtime_logs_db")
+        );
+        assert_eq!(
+            fallback_events[0].tags.get("reason").map(String::as_str),
+            Some("locked")
+        );
+
+        runtime
+            .insert_log(&LogEntry {
+                ts: 1,
+                ts_nanos: 0,
+                level: "INFO".to_string(),
+                target: "cli".to_string(),
+                message: Some("ephemeral-log-db".to_string()),
+                feedback_log_body: Some("ephemeral-log-db".to_string()),
+                thread_id: Some("thread-1".to_string()),
+                process_uuid: Some("proc-1".to_string()),
+                module_path: Some("mod".to_string()),
+                file: Some("main.rs".to_string()),
+                line: Some(7),
+            })
+            .await
+            .expect("write logs to fallback db");
+        let rows = runtime
+            .query_logs(&LogQuery::default())
+            .await
+            .expect("query logs from fallback db");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message.as_deref(), Some("ephemeral-log-db"));
+
+        runtime.close().await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut lock_conn)
+            .await
+            .expect("release logs db lock");
+        lock_conn.close().await.expect("close logs lock connection");
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 }
