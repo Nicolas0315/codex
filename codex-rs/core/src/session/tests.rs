@@ -7017,6 +7017,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             initial_window_id: Uuid::now_v7().to_string(),
+            history_mode: Default::default(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),

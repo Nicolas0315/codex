@@ -458,19 +458,26 @@ pub fn built_in_model_providers(
 ///
 /// Configured providers extend the built-in set. Built-in providers are not
 /// generally overridable, but the built-in Amazon Bedrock provider allows the
-/// user to set `aws.profile` and `aws.region`.
+/// user to set `base_url`, `aws.profile`, and `aws.region`.
 pub fn merge_configured_model_providers(
     mut model_providers: HashMap<String, ModelProviderInfo>,
     configured_model_providers: HashMap<String, ModelProviderInfo>,
 ) -> Result<HashMap<String, ModelProviderInfo>, String> {
     for (key, mut provider) in configured_model_providers {
         if key == AMAZON_BEDROCK_PROVIDER_ID {
+            let base_url_override = provider.base_url.take();
             let aws_override = provider.aws.take();
             if provider != ModelProviderInfo::default() {
                 return Err(format!(
                     "model_providers.{AMAZON_BEDROCK_PROVIDER_ID} only supports changing \
-`aws.profile` and `aws.region`; other non-default provider fields are not supported"
+`base_url`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
                 ));
+            }
+
+            if let Some(base_url) = base_url_override
+                && let Some(built_in_provider) = model_providers.get_mut(AMAZON_BEDROCK_PROVIDER_ID)
+            {
+                built_in_provider.base_url = Some(base_url);
             }
 
             if let Some(aws_override) = aws_override

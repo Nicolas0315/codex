@@ -12,6 +12,7 @@ use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::BedrockApiKeyAuth;
+use codex_model_provider_info::AMAZON_BEDROCK_DEFAULT_BASE_URL;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::ModelProviderInfo;
@@ -78,15 +79,28 @@ impl AmazonBedrockModelProvider {
         self.managed_auth().map(CodexAuth::BedrockApiKey)
     }
 
+    fn has_custom_base_url(&self) -> bool {
+        self.info
+            .base_url
+            .as_deref()
+            .is_some_and(|url| url != AMAZON_BEDROCK_DEFAULT_BASE_URL)
+    }
+
     async fn api_provider(&self) -> Result<Provider> {
-        let managed_auth = self.managed_auth();
         let mut api_provider_info = self.info.clone();
-        api_provider_info.base_url =
-            Some(runtime_base_url(managed_auth.as_ref(), &self.aws).await?);
+        if !self.has_custom_base_url() {
+            let managed_auth = self.managed_auth();
+            api_provider_info.base_url =
+                Some(runtime_base_url(managed_auth.as_ref(), &self.aws).await?);
+        }
         api_provider_info.to_api_provider(/*auth_mode*/ None)
     }
 
     async fn runtime_base_url(&self) -> Result<Option<String>> {
+        if self.has_custom_base_url() {
+            return Ok(self.info.base_url.clone());
+        }
+
         let managed_auth = self.managed_auth();
         Ok(Some(
             runtime_base_url(managed_auth.as_ref(), &self.aws).await?,
@@ -197,6 +211,34 @@ mod tests {
         assert_eq!(
             api_provider.base_url,
             "https://bedrock-mantle.eu-central-1.api.aws/openai/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_base_url_bypasses_runtime_url_computation() {
+        let custom_base_url = "https://gateway.example.com/bedrock/v1";
+        let mut provider_info =
+            ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
+                profile: None,
+                region: None,
+            }));
+        provider_info.base_url = Some(custom_base_url.to_string());
+        let provider = AmazonBedrockModelProvider::new(provider_info, /*auth_manager*/ None);
+
+        assert_eq!(
+            provider
+                .runtime_base_url()
+                .await
+                .expect("custom base URL should not require region resolution"),
+            Some(custom_base_url.to_string())
+        );
+        assert_eq!(
+            provider
+                .api_provider()
+                .await
+                .expect("custom base URL should build API provider")
+                .base_url,
+            custom_base_url
         );
     }
 

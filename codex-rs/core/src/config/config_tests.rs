@@ -772,6 +772,33 @@ region = "us-west-2"
 }
 
 #[tokio::test]
+async fn load_config_applies_amazon_bedrock_base_url_override() {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "amazon-bedrock"
+
+[model_providers.amazon-bedrock]
+base_url = "https://gateway.example.com/bedrock/v1"
+"#,
+    )
+    .expect("Amazon Bedrock base URL override should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(config.model_provider_id, "amazon-bedrock");
+    assert_eq!(
+        config.model_provider.base_url.as_deref(),
+        Some("https://gateway.example.com/bedrock/v1")
+    );
+}
+
+#[tokio::test]
 async fn load_config_rejects_unsupported_amazon_bedrock_overrides() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -779,7 +806,6 @@ model_provider = "amazon-bedrock"
 
 [model_providers.amazon-bedrock]
 name = "Custom Bedrock"
-base_url = "https://bedrock.example.com/v1"
 requires_openai_auth = true
 supports_websockets = true
 
@@ -800,7 +826,7 @@ region = "us-west-2"
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `aws.profile` and `aws.region`; other non-default provider fields are not supported"
+        "model_providers.amazon-bedrock only supports changing `base_url`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
     ));
 }
 
