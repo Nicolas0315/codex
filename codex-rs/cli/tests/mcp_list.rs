@@ -31,6 +31,67 @@ fn list_shows_empty_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn list_and_get_report_missing_bearer_token_env_var() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let env_var = "CODEX_MCP_LIST_TEST_MISSING_BEARER_TOKEN";
+
+    let mut add = codex_command(codex_home.path())?;
+    add.env_remove(env_var)
+        .args([
+            "mcp",
+            "add",
+            "remote",
+            "--url",
+            "https://example.com/mcp",
+            "--bearer-token-env-var",
+            env_var,
+        ])
+        .assert()
+        .success();
+
+    let mut list_cmd = codex_command(codex_home.path())?;
+    let list_output = list_cmd
+        .env_remove(env_var)
+        .args(["mcp", "list"])
+        .output()?;
+    assert!(list_output.status.success());
+    let stdout = String::from_utf8(list_output.stdout)?;
+    assert!(stdout.contains(env_var));
+    assert!(stdout.contains("Missing env var"));
+
+    let mut list_json_cmd = codex_command(codex_home.path())?;
+    let json_output = list_json_cmd
+        .env_remove(env_var)
+        .args(["mcp", "list", "--json"])
+        .output()?;
+    assert!(json_output.status.success());
+    let stdout = String::from_utf8(json_output.stdout)?;
+    let parsed: JsonValue = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed[0]["auth_status"], json!("not_logged_in"));
+
+    let mut get_cmd = codex_command(codex_home.path())?;
+    let get_output = get_cmd
+        .env_remove(env_var)
+        .args(["mcp", "get", "remote"])
+        .output()?;
+    assert!(get_output.status.success());
+    let stdout = String::from_utf8(get_output.stdout)?;
+    assert!(stdout.contains(&format!("bearer_token_env_var: {env_var}")));
+    assert!(stdout.contains("bearer_token_env_var_status: missing"));
+
+    let mut list_with_env_cmd = codex_command(codex_home.path())?;
+    let list_with_env_output = list_with_env_cmd
+        .env(env_var, "secret-token")
+        .args(["mcp", "list"])
+        .output()?;
+    assert!(list_with_env_output.status.success());
+    let stdout = String::from_utf8(list_with_env_output.stdout)?;
+    assert!(stdout.contains("Bearer token"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_and_get_render_expected_output() -> Result<()> {
     let codex_home = TempDir::new()?;
 

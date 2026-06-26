@@ -946,6 +946,7 @@ fn mcp_startup_failure_reason(
             McpAuthState::Unsupported
             | McpAuthState::LoggedOut(McpLoginRequirement::Login)
             | McpAuthState::BearerToken
+            | McpAuthState::BearerTokenEnvVarUnavailable
             | McpAuthState::OAuth,
         )
         | None => None,
@@ -957,7 +958,11 @@ fn mcp_init_error_display(
     entry: Option<&McpAuthStatusEntry>,
     err: &StartupOutcomeError,
 ) -> String {
-    if let Some(McpServerTransportConfig::StreamableHttp {
+    if let Some(env_var) = missing_bearer_token_env_var(entry) {
+        format!(
+            "The {server_name} MCP server is configured with bearer_token_env_var `{env_var}`, but that environment variable is missing or empty in this Codex process. Set it and restart Codex, then retry."
+        )
+    } else if let Some(McpServerTransportConfig::StreamableHttp {
         url,
         bearer_token_env_var,
         http_headers,
@@ -992,6 +997,25 @@ fn mcp_init_error_display(
         )
     } else {
         format!("MCP client for `{server_name}` failed to start: {err:#}")
+    }
+}
+
+fn missing_bearer_token_env_var(entry: Option<&McpAuthStatusEntry>) -> Option<&str> {
+    let entry = entry?;
+    if entry.auth_state != McpAuthState::BearerTokenEnvVarUnavailable {
+        return None;
+    }
+
+    match &entry.config.as_ref()?.transport {
+        McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var: Some(env_var),
+            ..
+        } => Some(env_var.as_str()),
+        McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var: None,
+            ..
+        }
+        | McpServerTransportConfig::Stdio { .. } => None,
     }
 }
 

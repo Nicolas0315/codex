@@ -1669,6 +1669,7 @@ fn mcp_startup_failure_reason_requires_existing_oauth_and_auth_failure() {
         ),
         (Some(McpAuthState::Unsupported), true, None),
         (Some(McpAuthState::BearerToken), true, None),
+        (Some(McpAuthState::BearerTokenEnvVarUnavailable), true, None),
         (Some(McpAuthState::OAuth), true, None),
         (None, true, None),
     ] {
@@ -1687,6 +1688,47 @@ fn mcp_startup_failure_reason_requires_existing_oauth_and_auth_failure() {
             "auth_state={auth_state:?}, is_authentication_required={is_authentication_required}"
         );
     }
+}
+
+#[test]
+fn mcp_init_error_display_reports_missing_bearer_token_env_var() {
+    let server_name = "custom";
+    let entry = McpAuthStatusEntry {
+        config: Some(McpServerConfig {
+            auth: Default::default(),
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "https://example.com".to_string(),
+                bearer_token_env_var: Some("CUSTOM_MCP_TOKEN".to_string()),
+                http_headers: None,
+                env_http_headers: None,
+            },
+            environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+            enabled: true,
+            required: false,
+            supports_parallel_tool_calls: false,
+            disabled_reason: None,
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
+            default_tools_approval_mode: None,
+            enabled_tools: None,
+            disabled_tools: None,
+            scopes: None,
+            oauth: None,
+            oauth_resource: None,
+            tools: HashMap::new(),
+        }),
+        auth_state: McpAuthState::BearerTokenEnvVarUnavailable,
+    };
+    let err: StartupOutcomeError =
+        anyhow::anyhow!("Environment variable CUSTOM_MCP_TOKEN for MCP server 'custom' is not set")
+            .into();
+
+    let display = mcp_init_error_display(server_name, Some(&entry), &err);
+
+    assert_eq!(
+        "The custom MCP server is configured with bearer_token_env_var `CUSTOM_MCP_TOKEN`, but that environment variable is missing or empty in this Codex process. Set it and restart Codex, then retry.",
+        display
+    );
 }
 
 #[test]

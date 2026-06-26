@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -20,6 +21,7 @@ use codex_core::config::load_global_mcp_servers;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::EnvironmentManager;
 use codex_login::AuthManager;
+use codex_mcp::McpAuthStatusEntry;
 use codex_mcp::McpOAuthLoginSupport;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::ResolvedMcpOAuthScopes;
@@ -29,6 +31,7 @@ use codex_mcp::oauth_login_support;
 use codex_mcp::resolve_oauth_scopes;
 use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::McpAuthState;
 use codex_rmcp_client::delete_oauth_tokens;
 use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
@@ -655,11 +658,7 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "-".to_string());
                 let status = format_mcp_status(cfg);
-                let auth_status = auth_statuses
-                    .get(name.as_str())
-                    .map(|entry| McpAuthStatus::from(entry.auth_state))
-                    .unwrap_or(McpAuthStatus::Unsupported)
-                    .to_string();
+                let auth_status = format_mcp_auth_status(auth_statuses.get(name.as_str()));
                 stdio_rows.push([
                     name.clone(),
                     command.clone(),
@@ -676,11 +675,7 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                 ..
             } => {
                 let status = format_mcp_status(cfg);
-                let auth_status = auth_statuses
-                    .get(name.as_str())
-                    .map(|entry| McpAuthStatus::from(entry.auth_state))
-                    .unwrap_or(McpAuthStatus::Unsupported)
-                    .to_string();
+                let auth_status = format_mcp_auth_status(auth_statuses.get(name.as_str()));
                 let bearer_token_display =
                     bearer_token_env_var.as_deref().unwrap_or("-").to_string();
                 http_rows.push([
@@ -925,6 +920,12 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
             println!("  url: {url}");
             let bearer_token_display = bearer_token_env_var.as_deref().unwrap_or("-");
             println!("  bearer_token_env_var: {bearer_token_display}");
+            if let Some(env_var) = bearer_token_env_var {
+                println!(
+                    "  bearer_token_env_var_status: {}",
+                    format_bearer_token_env_var_status(env_var)
+                );
+            }
             let headers_display = match http_headers {
                 Some(map) if !map.is_empty() => {
                     let mut pairs: Vec<_> = map.iter().collect();
@@ -1007,5 +1008,22 @@ fn format_mcp_status(config: &McpServerConfig) -> String {
         format!("disabled: {reason}")
     } else {
         "disabled".to_string()
+    }
+}
+
+fn format_mcp_auth_status(entry: Option<&McpAuthStatusEntry>) -> String {
+    match entry.map(|entry| entry.auth_state) {
+        Some(McpAuthState::BearerTokenEnvVarUnavailable) => "Missing env var".to_string(),
+        Some(auth_state) => McpAuthStatus::from(auth_state).to_string(),
+        None => McpAuthStatus::Unsupported.to_string(),
+    }
+}
+
+fn format_bearer_token_env_var_status(env_var: &str) -> &'static str {
+    match env::var(env_var) {
+        Ok(value) if !value.is_empty() => "set",
+        Ok(_) => "empty",
+        Err(env::VarError::NotPresent) => "missing",
+        Err(env::VarError::NotUnicode(_)) => "invalid unicode",
     }
 }

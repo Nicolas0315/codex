@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +40,7 @@ pub enum McpAuthState {
     Unsupported,
     LoggedOut(McpLoginRequirement),
     BearerToken,
+    BearerTokenEnvVarUnavailable,
     OAuth,
 }
 
@@ -48,6 +50,7 @@ impl From<McpAuthState> for McpAuthStatus {
             McpAuthState::Unsupported => Self::Unsupported,
             McpAuthState::LoggedOut(_) => Self::NotLoggedIn,
             McpAuthState::BearerToken => Self::BearerToken,
+            McpAuthState::BearerTokenEnvVarUnavailable => Self::NotLoggedIn,
             McpAuthState::OAuth => Self::OAuth,
         }
     }
@@ -134,8 +137,11 @@ fn auth_status_before_discovery(
     store_mode: OAuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
 ) -> Result<AuthStatusCheck> {
-    if bearer_token_env_var.is_some() {
-        return Ok(AuthStatusCheck::Complete(McpAuthState::BearerToken));
+    if let Some(env_var) = bearer_token_env_var {
+        return Ok(AuthStatusCheck::Complete(match env::var(env_var) {
+            Ok(value) if !value.is_empty() => McpAuthState::BearerToken,
+            Ok(_) | Err(_) => McpAuthState::BearerTokenEnvVarUnavailable,
+        }));
     }
 
     let default_headers = build_default_headers(http_headers, env_http_headers)?;
@@ -386,6 +392,51 @@ mod tests {
         .expect("status should compute");
 
         assert_eq!(status, McpAuthState::BearerToken);
+    }
+
+    #[tokio::test]
+    #[serial(auth_status_env)]
+    async fn determine_auth_status_uses_bearer_token_when_bearer_env_var_present() {
+        let _guard = EnvVarGuard::set("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_BEARER_TOKEN", "token");
+        let status = determine_streamable_http_auth_status(
+            "server",
+            "not-a-url",
+            Some("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_BEARER_TOKEN"),
+            /*http_headers*/ None,
+            /*env_http_headers*/ None,
+            OAuthCredentialsStoreMode::Keyring,
+            AuthKeyringBackendKind::default(),
+        )
+        .await
+        .expect("status should compute");
+
+        assert_eq!(status, McpAuthState::BearerToken);
+    }
+
+    #[tokio::test]
+    #[serial(auth_status_env)]
+    async fn determine_auth_status_reports_unavailable_bearer_env_var() {
+        let _guard = EnvVarGuard {
+            key: "CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_MISSING_BEARER_TOKEN".to_string(),
+            original: std::env::var_os("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_MISSING_BEARER_TOKEN"),
+        };
+        unsafe {
+            std::env::remove_var("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_MISSING_BEARER_TOKEN");
+        }
+        let status = determine_streamable_http_auth_status(
+            "server",
+            "not-a-url",
+            Some("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_MISSING_BEARER_TOKEN"),
+            /*http_headers*/ None,
+            /*env_http_headers*/ None,
+            OAuthCredentialsStoreMode::Keyring,
+            AuthKeyringBackendKind::default(),
+        )
+        .await
+        .expect("status should compute");
+
+        assert_eq!(status, McpAuthState::BearerTokenEnvVarUnavailable);
+        assert_eq!(McpAuthStatus::from(status), McpAuthStatus::NotLoggedIn);
     }
 
     #[tokio::test]
