@@ -1,8 +1,8 @@
 //! Multi-agent picker navigation and labeling state for the TUI app.
 //!
 //! This module exists to keep the pure parts of multi-agent navigation out of [`crate::app::App`].
-//! It owns the stable spawn-order cache used by the `/agent` picker, keyboard next/previous
-//! navigation, and the contextual footer label for the thread currently being watched.
+//! It owns the stable spawn-order cache used by keyboard next/previous navigation, picker
+//! metadata, and the contextual footer label for the thread currently being watched.
 //!
 //! Responsibilities here are intentionally narrow:
 //! - remember picker entries and their first-seen order
@@ -40,7 +40,7 @@ use std::collections::HashMap;
 pub(crate) struct AgentNavigationState {
     /// Latest picker metadata for each tracked thread id.
     threads: HashMap<ThreadId, AgentPickerThreadEntry>,
-    /// Stable first-seen traversal order for picker rows and keyboard cycling.
+    /// Stable first-seen traversal order for keyboard cycling.
     order: Vec<ThreadId>,
 }
 
@@ -197,6 +197,16 @@ impl AgentNavigationState {
             .collect()
     }
 
+    /// Returns picker rows with the newest discovered threads first.
+    ///
+    /// Keyboard traversal intentionally stays first-seen via `ordered_threads`; the picker is a
+    /// visual list where the most recently launched sub-agent should be easiest to reach.
+    pub(crate) fn picker_threads(&self) -> Vec<(ThreadId, &AgentPickerThreadEntry)> {
+        let mut threads = self.ordered_threads();
+        threads.reverse();
+        threads
+    }
+
     pub(crate) fn ordered_path_backed_subagent_threads(
         &self,
         primary_thread_id: Option<ThreadId>,
@@ -213,7 +223,7 @@ impl AgentNavigationState {
             .collect()
     }
 
-    /// Returns tracked thread ids in the same stable order used by the picker.
+    /// Returns tracked thread ids in stable traversal order.
     pub(crate) fn tracked_thread_ids(&self) -> Vec<ThreadId> {
         self.ordered_threads()
             .into_iter()
@@ -391,6 +401,26 @@ mod tests {
         assert_eq!(
             state.adjacent_thread_id(Some(main_thread_id), AgentNavigationDirection::Previous),
             Some(second_agent_id)
+        );
+    }
+
+    #[test]
+    fn picker_threads_show_newest_first_without_changing_traversal_order() {
+        let (state, main_thread_id, first_agent_id, second_agent_id) = populated_state();
+
+        let picker_thread_ids: Vec<ThreadId> = state
+            .picker_threads()
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .collect();
+
+        assert_eq!(
+            picker_thread_ids,
+            vec![second_agent_id, first_agent_id, main_thread_id]
+        );
+        assert_eq!(
+            state.ordered_thread_ids(),
+            vec![main_thread_id, first_agent_id, second_agent_id]
         );
     }
 
