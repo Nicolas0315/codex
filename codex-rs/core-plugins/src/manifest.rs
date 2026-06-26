@@ -348,22 +348,15 @@ fn resolve_default_prompts(
         RawPluginManifestDefaultPrompt::List(values) => {
             let mut prompts = Vec::new();
             for (index, item) in values.iter().enumerate() {
-                if prompts.len() >= MAX_DEFAULT_PROMPT_COUNT {
-                    warn_invalid_default_prompt(
-                        manifest_path,
-                        "interface.defaultPrompt",
-                        &format!("maximum of {MAX_DEFAULT_PROMPT_COUNT} prompts is supported"),
-                    );
-                    break;
-                }
-
                 match item {
                     RawPluginManifestDefaultPromptEntry::String(prompt) => {
                         let field = format!("interface.defaultPrompt[{index}]");
                         if let Some(prompt) =
                             resolve_default_prompt_str(manifest_path, &field, prompt)
                         {
-                            prompts.push(prompt);
+                            if prompts.len() < MAX_DEFAULT_PROMPT_COUNT {
+                                prompts.push(prompt);
+                            }
                         }
                     }
                     RawPluginManifestDefaultPromptEntry::Invalid(value) => {
@@ -528,6 +521,9 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use tracing::Level;
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_test::internal::MockWriter;
 
     use crate::ExecutorPluginProvider;
 
@@ -618,6 +614,53 @@ mod tests {
                 "Draft the reply".to_string(),
                 "Find my next action".to_string(),
             ])
+        );
+    }
+
+    #[test]
+    fn plugin_interface_truncates_default_prompt_array_without_warning() {
+        let tmp = tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("demo-plugin");
+        write_manifest(
+            &plugin_root,
+            /*version*/ None,
+            r#"{
+    "displayName": "Demo Plugin",
+    "defaultPrompt": [
+      "Summarize my inbox",
+      "Draft the reply",
+      "Find my next action",
+      "Archive old mail"
+    ]
+  }"#,
+        );
+        let buffer: &'static std::sync::Mutex<Vec<u8>> =
+            Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_level(true)
+            .with_ansi(false)
+            .with_max_level(Level::WARN)
+            .with_span_events(FmtSpan::NONE)
+            .with_writer(MockWriter::new(buffer))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let manifest = load_manifest(&plugin_root);
+        let interface = manifest.interface.expect("plugin interface");
+
+        assert_eq!(
+            interface.default_prompt,
+            Some(vec![
+                "Summarize my inbox".to_string(),
+                "Draft the reply".to_string(),
+                "Find my next action".to_string(),
+            ])
+        );
+        let logs =
+            String::from_utf8(buffer.lock().expect("buffer lock").clone()).expect("utf8 logs");
+        assert!(
+            !logs.contains("maximum of 3 prompts is supported"),
+            "unexpected default prompt limit warning: {logs}"
         );
     }
 
