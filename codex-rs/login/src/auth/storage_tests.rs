@@ -64,6 +64,21 @@ async fn file_storage_save_persists_auth_dot_json() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn file_storage_save_replaces_existing_auth_file() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
+    let file = get_auth_file(codex_home.path());
+    storage.save(&auth_with_prefix("old"))?;
+
+    let expected = auth_with_prefix("new");
+    storage.save(&expected)?;
+
+    let saved = storage.try_read_auth_json(&file)?;
+    assert_eq!(expected, saved);
+    Ok(())
+}
+
+#[tokio::test]
 async fn file_storage_round_trips_agent_identity_auth() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
     let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
