@@ -8,6 +8,11 @@ pub enum PasteImageError {
     NoImage(String),
     EncodeFailed(String),
     IoError(String),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    WslClipboardFallbackFailed {
+        native_error: String,
+        fallback_error: String,
+    },
 }
 
 impl std::fmt::Display for PasteImageError {
@@ -17,6 +22,13 @@ impl std::fmt::Display for PasteImageError {
             PasteImageError::NoImage(msg) => write!(f, "no image on clipboard: {msg}"),
             PasteImageError::EncodeFailed(msg) => write!(f, "could not encode image: {msg}"),
             PasteImageError::IoError(msg) => write!(f, "io error: {msg}"),
+            PasteImageError::WslClipboardFallbackFailed {
+                native_error,
+                fallback_error,
+            } => write!(
+                f,
+                "clipboard image paste failed under WSL: native clipboard: {native_error}; Windows clipboard fallback: {fallback_error}"
+            ),
         }
     }
 }
@@ -139,7 +151,7 @@ pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImag
         Err(e) => {
             #[cfg(target_os = "linux")]
             {
-                try_wsl_clipboard_fallback(&e).or(Err(e))
+                try_wsl_clipboard_fallback(&e)
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -167,18 +179,31 @@ fn try_wsl_clipboard_fallback(
     }
 
     tracing::debug!("attempting Windows PowerShell clipboard fallback");
-    let Some(win_path) = try_dump_windows_clipboard_image() else {
-        return Err(error.clone());
-    };
+    let win_path = try_dump_windows_clipboard_image().map_err(|fallback_error| {
+        PasteImageError::WslClipboardFallbackFailed {
+            native_error: error.to_string(),
+            fallback_error,
+        }
+    })?;
 
     tracing::debug!("powershell produced path: {}", win_path);
     let Some(mapped_path) = convert_windows_path_to_wsl(&win_path) else {
-        return Err(error.clone());
+        return Err(PasteImageError::WslClipboardFallbackFailed {
+            native_error: error.to_string(),
+            fallback_error: format!("PowerShell returned an unsupported Windows path `{win_path}`"),
+        });
     };
 
-    let Ok((w, h)) = image::image_dimensions(&mapped_path) else {
-        return Err(error.clone());
-    };
+    let (w, h) =
+        image::image_dimensions(&mapped_path).map_err(|err| {
+            PasteImageError::WslClipboardFallbackFailed {
+                native_error: error.to_string(),
+                fallback_error: format!(
+                    "PowerShell wrote `{win_path}`, mapped to `{}`, but Codex could not read the image: {err}",
+                    mapped_path.display()
+                ),
+            }
+        })?;
 
     // Return the mapped path directly without copying.
     // The file will be read and base64-encoded during serialization.
@@ -194,38 +219,72 @@ fn try_wsl_clipboard_fallback(
 
 /// Try to call a Windows PowerShell command (several common names) to save the
 /// clipboard image to a temporary PNG and return the Windows path to that file.
-/// Returns None if no command succeeded or no image was present.
+/// Returns an explanatory error if no command succeeded or no image was present.
 #[cfg(target_os = "linux")]
-fn try_dump_windows_clipboard_image() -> Option<String> {
+fn try_dump_windows_clipboard_image() -> Result<String, String> {
     // Powershell script: save image from clipboard to a temp png and print the path.
     // Force UTF-8 output to avoid encoding issues between powershell.exe (UTF-16LE default)
     // and pwsh (UTF-8 default).
     let script = r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $img = Get-Clipboard -Format Image; if ($img -ne $null) { $p=[System.IO.Path]::GetTempFileName(); $p = [System.IO.Path]::ChangeExtension($p,'png'); $img.Save($p,[System.Drawing.Imaging.ImageFormat]::Png); Write-Output $p } else { exit 1 }"#;
-
-    for cmd in ["powershell.exe", "pwsh", "powershell"] {
-        match std::process::Command::new(cmd)
+    try_dump_windows_clipboard_image_with(|cmd| {
+        std::process::Command::new(cmd)
             .args(["-NoProfile", "-Command", script])
             .output()
-        {
-            // Executing PowerShell command
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn try_dump_windows_clipboard_image_with(
+    mut run_command: impl FnMut(&str) -> std::io::Result<std::process::Output>,
+) -> Result<String, String> {
+    let mut failures = Vec::new();
+    for cmd in ["powershell.exe", "pwsh", "powershell"] {
+        match run_command(cmd) {
             Ok(output) => {
                 if output.status.success() {
-                    // Decode as UTF-8 (forced by the script above).
                     let win_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !win_path.is_empty() {
                         tracing::debug!("{} saved clipboard image to {}", cmd, win_path);
-                        return Some(win_path);
+                        return Ok(win_path);
                     }
+                    failures.push(format!("{cmd} succeeded but did not print an image path"));
                 } else {
-                    tracing::debug!("{} returned non-zero status", cmd);
+                    let stderr = preview_command_output(&output.stderr);
+                    let stdout = preview_command_output(&output.stdout);
+                    let detail = if stderr.is_empty() && stdout.is_empty() {
+                        "no output; clipboard may not contain an image".to_string()
+                    } else if stderr.is_empty() {
+                        format!("stdout: {stdout}")
+                    } else if stdout.is_empty() {
+                        format!("stderr: {stderr}")
+                    } else {
+                        format!("stderr: {stderr}; stdout: {stdout}")
+                    };
+                    tracing::debug!("{} returned non-zero status: {}", cmd, detail);
+                    failures.push(format!("{cmd} exited with {}: {detail}", output.status));
                 }
             }
             Err(err) => {
                 tracing::debug!("{} not executable: {}", cmd, err);
+                failures.push(format!("{cmd} could not be executed: {err}"));
             }
         }
     }
-    None
+    Err(failures.join("; "))
+}
+
+#[cfg(target_os = "linux")]
+fn preview_command_output(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 240;
+    let text = String::from_utf8_lossy(bytes)
+        .replace('\r', " ")
+        .replace('\n', " ");
+    let text = text.trim();
+    let mut preview = text.chars().take(MAX_CHARS).collect::<String>();
+    if text.chars().count() > MAX_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
 
 #[cfg(target_os = "android")]
@@ -371,6 +430,72 @@ pub fn pasted_image_format(path: &Path) -> EncodedImageFormat {
         Some("png") => EncodedImageFormat::Png,
         Some("jpg") | Some("jpeg") => EncodedImageFormat::Jpeg,
         _ => EncodedImageFormat::Other,
+    }
+}
+
+#[cfg(test)]
+mod paste_image_error_tests {
+    use super::*;
+
+    #[test]
+    fn wsl_clipboard_fallback_error_display_preserves_both_contexts() {
+        let error = PasteImageError::WslClipboardFallbackFailed {
+            native_error: "no image on clipboard: unsupported format".to_string(),
+            fallback_error: "powershell.exe could not be executed: Exec format error".to_string(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "clipboard image paste failed under WSL: native clipboard: no image on clipboard: unsupported format; Windows clipboard fallback: powershell.exe could not be executed: Exec format error"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod wsl_clipboard_fallback_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn output(status_code: i32, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(status_code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn dump_windows_clipboard_image_reports_all_command_failures() {
+        let result = try_dump_windows_clipboard_image_with(|cmd| match cmd {
+            "powershell.exe" => Err(std::io::Error::from_raw_os_error(8)),
+            "pwsh" => Ok(output(1, b"", b"interop disabled")),
+            "powershell" => Ok(output(0, b"", b"")),
+            _ => unreachable!("unexpected command {cmd}"),
+        });
+
+        let error = result.expect_err("all attempts should fail");
+        assert!(error.contains("powershell.exe could not be executed"));
+        assert!(error.contains("pwsh exited with exit status: 1: stderr: interop disabled"));
+        assert!(error.contains("powershell succeeded but did not print an image path"));
+    }
+
+    #[test]
+    fn dump_windows_clipboard_image_returns_first_non_empty_path() {
+        let result = try_dump_windows_clipboard_image_with(|cmd| match cmd {
+            "powershell.exe" => Ok(output(1, b"", b"no image")),
+            "pwsh" => Ok(output(
+                0,
+                b"C:\\Users\\Alice\\AppData\\Local\\Temp\\clip.png\r\n",
+                b"",
+            )),
+            "powershell" => unreachable!("should stop after pwsh succeeds"),
+            _ => unreachable!("unexpected command {cmd}"),
+        });
+
+        assert_eq!(
+            result.expect("pwsh path should be returned"),
+            r"C:\Users\Alice\AppData\Local\Temp\clip.png"
+        );
     }
 }
 
