@@ -30,13 +30,12 @@ use tokio::sync::oneshot;
 use tracing::Event;
 use tracing::field::Field;
 use tracing::field::Visit;
-use tracing::level_filters::LevelFilter;
 use tracing::span::Attributes;
 use tracing::span::Id;
 use tracing::span::Record;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::field::RecordFields;
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::FormattedFields;
 use tracing_subscriber::fmt::format::DefaultFields;
@@ -49,13 +48,31 @@ use crate::StateRuntime;
 const LOG_QUEUE_CAPACITY: usize = 512;
 const LOG_BATCH_SIZE: usize = 128;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+const DEFAULT_LOG_DB_FILTER: &str = "trace";
 
-pub fn default_filter() -> Targets {
-    Targets::new()
-        .with_default(LevelFilter::TRACE)
-        .with_target("log", LevelFilter::OFF)
-        .with_target("codex_otel.log_only", LevelFilter::OFF)
-        .with_target("codex_otel.trace_safe", LevelFilter::OFF)
+pub fn default_filter() -> EnvFilter {
+    default_filter_from_env(std::env::var("RUST_LOG").ok().as_deref())
+}
+
+fn default_filter_from_env(rust_log: Option<&str>) -> EnvFilter {
+    let mut filter = match rust_log.filter(|value| !value.trim().is_empty()) {
+        Some(value) => {
+            EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_DB_FILTER))
+        }
+        None => EnvFilter::new(DEFAULT_LOG_DB_FILTER),
+    };
+    for directive in [
+        "log=off",
+        "codex_otel.log_only=off",
+        "codex_otel.trace_safe=off",
+    ] {
+        filter = filter.add_directive(
+            directive
+                .parse()
+                .expect("log DB default filter directive should parse"),
+        );
+    }
+    filter
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
