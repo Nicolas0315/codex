@@ -847,6 +847,32 @@ async fn rolling_rate_limit_snapshot_preserves_prior_individual_limit() {
 }
 
 #[tokio::test]
+async fn status_line_monthly_limit_renders_individual_limit_remaining() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.config.tui_status_line = Some(vec!["monthly-limit".to_string()]);
+    let mut usage_limits = snapshot(/*percent*/ 10.0);
+    usage_limits.individual_limit = Some(SpendControlLimitSnapshot {
+        limit: "25000".to_string(),
+        used: "8000".to_string(),
+        remaining_percent: 68,
+        resets_at: 1_800_000_000,
+    });
+
+    chat.on_rate_limit_snapshot(Some(usage_limits));
+    chat.refresh_status_line();
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("monthly 68% left".to_string())
+    );
+    assert!(
+        drain_insert_history(&mut rx).is_empty(),
+        "monthly-limit should be a valid status line item"
+    );
+}
+
+#[tokio::test]
 async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

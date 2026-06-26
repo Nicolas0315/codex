@@ -109,6 +109,9 @@ pub(crate) enum StatusLineItem {
     /// Remaining usage on the secondary rate limit.
     WeeklyLimit,
 
+    /// Remaining monthly credit limit.
+    MonthlyLimit,
+
     /// Codex application version.
     CodexVersion,
 
@@ -175,6 +178,9 @@ impl StatusLineItem {
             StatusLineItem::WeeklyLimit => {
                 "Remaining usage on the secondary usage limit (omitted when unavailable)"
             }
+            StatusLineItem::MonthlyLimit => {
+                "Remaining usage on the monthly usage limit (omitted when unavailable)"
+            }
             StatusLineItem::CodexVersion => "Codex application version",
             StatusLineItem::ContextWindowSize => {
                 "Total context window size in tokens (omitted when unknown)"
@@ -214,6 +220,7 @@ impl StatusLineItem {
             StatusLineItem::ContextUsed => StatusSurfacePreviewItem::ContextUsed,
             StatusLineItem::FiveHourLimit => StatusSurfacePreviewItem::FiveHourLimit,
             StatusLineItem::WeeklyLimit => StatusSurfacePreviewItem::WeeklyLimit,
+            StatusLineItem::MonthlyLimit => StatusSurfacePreviewItem::MonthlyLimit,
             StatusLineItem::CodexVersion => StatusSurfacePreviewItem::CodexVersion,
             StatusLineItem::ContextWindowSize => StatusSurfacePreviewItem::ContextWindowSize,
             StatusLineItem::UsedTokens => StatusSurfacePreviewItem::UsedTokens,
@@ -352,7 +359,9 @@ impl StatusLineSetupView {
         let default_name = item.to_string();
         let default_description = item.description();
         let (name, description) = match item {
-            StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => (
+            StatusLineItem::FiveHourLimit
+            | StatusLineItem::WeeklyLimit
+            | StatusLineItem::MonthlyLimit => (
                 preview_data.rate_limit_item_name(item.preview_item(), &default_name),
                 preview_data.rate_limit_item_description(item.preview_item(), default_description),
             ),
@@ -493,6 +502,15 @@ mod tests {
         assert_eq!(
             "branch-changes".parse::<StatusLineItem>(),
             Ok(StatusLineItem::BranchChanges)
+        );
+    }
+
+    #[test]
+    fn monthly_limit_is_selectable_id() {
+        assert_eq!(StatusLineItem::MonthlyLimit.to_string(), "monthly-limit");
+        assert_eq!(
+            "monthly-limit".parse::<StatusLineItem>(),
+            Ok(StatusLineItem::MonthlyLimit)
         );
     }
 

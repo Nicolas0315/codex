@@ -715,6 +715,10 @@ impl ChatWidget {
                 let label = limit_label_for_window(window.window_minutes, is_secondary);
                 self.status_line_limit_display(Some(window), &label)
             }
+            StatusLineItem::MonthlyLimit => self
+                .rate_limit_snapshots_by_limit_id
+                .get("codex")
+                .and_then(monthly_status_line_limit),
             StatusLineItem::CodexVersion => Some(CODEX_CLI_VERSION.to_string()),
             StatusLineItem::ContextWindowSize => self
                 .status_line_context_window_size()
@@ -780,6 +784,7 @@ impl ChatWidget {
             StatusSurfacePreviewItem::ContextUsed => StatusLineItem::ContextUsed,
             StatusSurfacePreviewItem::FiveHourLimit => StatusLineItem::FiveHourLimit,
             StatusSurfacePreviewItem::WeeklyLimit => StatusLineItem::WeeklyLimit,
+            StatusSurfacePreviewItem::MonthlyLimit => StatusLineItem::MonthlyLimit,
             StatusSurfacePreviewItem::CodexVersion => StatusLineItem::CodexVersion,
             StatusSurfacePreviewItem::ContextWindowSize => StatusLineItem::ContextWindowSize,
             StatusSurfacePreviewItem::UsedTokens => StatusLineItem::UsedTokens,
@@ -1010,6 +1015,18 @@ fn weekly_status_window(
 ) -> Option<(&RateLimitWindowDisplay, bool)> {
     find_codex_window(snapshot, "weekly")
         .or_else(|| snapshot.secondary.as_ref().map(|window| (window, true)))
+}
+
+fn monthly_status_line_limit(snapshot: &RateLimitSnapshotDisplay) -> Option<String> {
+    if let Some(limit) = snapshot.individual_limit.as_ref() {
+        let remaining = limit.percent_remaining.clamp(0.0, 100.0);
+        return Some(format!("monthly {remaining:.0}% left"));
+    }
+
+    let (window, is_secondary) = find_codex_window(snapshot, "monthly")?;
+    let label = limit_label_for_window(window.window_minutes, is_secondary);
+    let remaining = (100.0f64 - window.used_percent).clamp(0.0f64, 100.0f64);
+    Some(format!("{label} {remaining:.0}% left"))
 }
 
 fn find_codex_window<'a>(

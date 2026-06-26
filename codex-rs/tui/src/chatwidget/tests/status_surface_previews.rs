@@ -1,5 +1,6 @@
 use super::*;
 use crate::bottom_pane::preview_line_for_title_items;
+use codex_app_server_protocol::SpendControlLimitSnapshot;
 use pretty_assertions::assert_eq;
 use ratatui::text::Line;
 
@@ -77,6 +78,24 @@ fn cache_rate_limit_snapshot(chat: &mut ChatWidget) {
         }),
         credits: None,
         individual_limit: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    }));
+}
+
+fn cache_monthly_limit_snapshot(chat: &mut ChatWidget) {
+    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
+        limit_id: None,
+        limit_name: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: Some(SpendControlLimitSnapshot {
+            limit: "25000".to_string(),
+            used: "8000".to_string(),
+            remaining_percent: 68,
+            resets_at: 1_800_000_000,
+        }),
         plan_type: None,
         rate_limit_reached_type: None,
     }));
@@ -230,6 +249,17 @@ async fn status_surface_preview_lines_rate_limits_snapshot() {
     );
 
     assert_chatwidget_snapshot!("status_surface_previews_rate_limits", snapshot);
+}
+
+#[tokio::test]
+async fn status_surface_preview_lines_monthly_limit() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    cache_monthly_limit_snapshot(&mut chat);
+
+    assert_eq!(
+        status_preview_line(&mut chat, &[StatusLineItem::MonthlyLimit]),
+        "monthly 68% left"
+    );
 }
 
 #[tokio::test]
