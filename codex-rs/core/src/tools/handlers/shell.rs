@@ -18,6 +18,7 @@ use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
 use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
+use crate::tools::handlers::opaque_transport::reject_opaque_encoded_patch_transport;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::orchestrator::ToolOrchestrator;
 use crate::tools::runtimes::shell::ShellRequest;
@@ -153,6 +154,10 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     .await?
     {
         return Ok(output);
+    }
+
+    if let Some(message) = reject_opaque_encoded_patch_transport(&exec_params.command) {
+        return Err(FunctionCallError::RespondToModel(message));
     }
 
     let source = ExecCommandSource::Agent;

@@ -89,12 +89,15 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         name: "exec_command".to_string(),
         description: if cfg!(windows) {
             format!(
-                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}\n\n{}",
+                encoded_transfer_guidance(),
                 windows_shell_guidance()
             )
         } else {
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-                .to_string()
+            format!(
+                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+                encoded_transfer_guidance()
+            )
         },
         strict: false,
         defer_loading: None,
@@ -198,13 +201,17 @@ Examples of valid command strings:
 - setting an env var: "$env:FOO='bar'; echo $env:FOO"
 - running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -"
 
+{}
+
 {}"#,
+            encoded_transfer_guidance(),
             windows_shell_guidance()
         )
     } else {
-        r#"Runs a shell command and returns its output.
-- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
-            .to_string()
+        format!(
+            "Runs a shell command and returns its output.\n- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.\n\n{}",
+            encoded_transfer_guidance()
+        )
     };
 
     ToolSpec::Function(ResponsesApiTool {
@@ -404,6 +411,10 @@ fn windows_shell_guidance() -> &'static str {
 - Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
 - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
 - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#
+}
+
+fn encoded_transfer_guidance() -> &'static str {
+    "Encoded transfer safety:\n- Do not use base64, EncodedCommand, or similar opaque shell transports to move patches or scripts. Use the native apply_patch tool, stdin/heredoc input, or file APIs with inspectable source content. If terminal setup failed, report the terminal error instead of retrying via encoded shell recovery."
 }
 
 #[cfg(test)]

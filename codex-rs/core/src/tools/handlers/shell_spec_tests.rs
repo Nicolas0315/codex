@@ -6,6 +6,10 @@ fn windows_shell_guidance_description() -> String {
     format!("\n\n{}", windows_shell_guidance())
 }
 
+fn encoded_transfer_guidance_description() -> String {
+    format!("\n\n{}", encoded_transfer_guidance())
+}
+
 fn has_parameter(tool: &ToolSpec, parameter_name: &str) -> bool {
     serde_json::to_value(tool)
         .expect("tool spec should serialize")
@@ -22,12 +26,15 @@ fn exec_command_tool_matches_expected_spec() {
 
     let description = if cfg!(windows) {
         format!(
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}",
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}{}",
+            encoded_transfer_guidance_description(),
             windows_shell_guidance_description()
         )
     } else {
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-            .to_string()
+        format!(
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}",
+            encoded_transfer_guidance_description()
+        )
     };
 
     let mut properties = BTreeMap::from([
@@ -218,11 +225,13 @@ Examples of valid command strings:
 - setting an env var: "$env:FOO='bar'; echo $env:FOO"
 - running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -""#
             .to_string()
+            + &encoded_transfer_guidance_description()
             + &windows_shell_guidance_description()
     } else {
-        r#"Runs a shell command and returns its output.
-- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
-            .to_string()
+        format!(
+            "Runs a shell command and returns its output.\n- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.{}",
+            encoded_transfer_guidance_description()
+        )
     };
 
     let mut properties = BTreeMap::from([
