@@ -2,6 +2,7 @@ use super::threads::ThreadFilterOptions;
 use super::threads::push_thread_filters;
 use super::*;
 use crate::SortDirection;
+use crate::model::MemoryEntry;
 use crate::model::Phase2JobClaimOutcome;
 use crate::model::Stage1JobClaim;
 use crate::model::Stage1JobClaimOutcome;
@@ -28,6 +29,14 @@ const DEFAULT_RETRY_REMAINING: i64 = 3;
 pub struct MemoryStore {
     pool: Arc<SqlitePool>,
     state_pool: Arc<SqlitePool>,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryEntryThreadMetadata {
+    rollout_path: PathBuf,
+    cwd: PathBuf,
+    git_branch: Option<String>,
+    memory_mode: Option<String>,
 }
 
 impl MemoryStore {
@@ -367,6 +376,256 @@ ORDER BY so.source_updated_at DESC, so.thread_id DESC
         }
 
         Ok(outputs)
+    }
+
+    /// Lists non-empty stage-1 memory entries for user inspection.
+    ///
+    /// Unlike the global consolidation input query, this intentionally includes
+    /// memories for disabled, polluted, or missing threads so users can audit
+    /// stale durable influence.
+    pub async fn list_memory_entries(&self, limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+        self.query_memory_entries(None, limit).await
+    }
+
+    /// Searches non-empty stage-1 memory entries by thread id, rollout slug,
+    /// raw memory, rollout summary, or hydrated thread metadata.
+    pub async fn search_memory_entries(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.query_memory_entries(Some(query), limit).await
+    }
+
+    /// Returns one non-empty stage-1 memory entry by source thread id.
+    pub async fn get_memory_entry(
+        &self,
+        thread_id: ThreadId,
+    ) -> anyhow::Result<Option<MemoryEntry>> {
+        let row = sqlx::query(
+            r#"
+SELECT
+    so.thread_id,
+    so.source_updated_at,
+    so.raw_memory,
+    so.rollout_summary,
+    so.rollout_slug,
+    so.generated_at,
+    COALESCE(so.usage_count, 0) AS usage_count,
+    so.last_usage,
+    so.selected_for_phase2,
+    so.selected_for_phase2_source_updated_at
+FROM stage1_outputs AS so
+WHERE so.thread_id = ?
+  AND (length(trim(so.raw_memory)) > 0 OR length(trim(so.rollout_summary)) > 0)
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.memory_entry_from_row(&row).await.map(Some)
+    }
+
+    async fn query_memory_entries(
+        &self,
+        query: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = if let Some(query) = query {
+            let pattern = format!("%{}%", query.to_ascii_lowercase());
+            let metadata_thread_ids = self.memory_entry_metadata_thread_ids(query, limit).await?;
+            let mut builder = QueryBuilder::new(
+                r#"
+SELECT
+    so.thread_id,
+    so.source_updated_at,
+    so.raw_memory,
+    so.rollout_summary,
+    so.rollout_slug,
+    so.generated_at,
+    COALESCE(so.usage_count, 0) AS usage_count,
+    so.last_usage,
+    so.selected_for_phase2,
+    so.selected_for_phase2_source_updated_at
+FROM stage1_outputs AS so
+WHERE (length(trim(so.raw_memory)) > 0 OR length(trim(so.rollout_summary)) > 0)
+  AND (
+      lower(so.thread_id) LIKE
+                "#,
+            );
+            builder.push_bind(pattern.as_str());
+            builder.push(
+                r#"
+      OR lower(COALESCE(so.raw_memory, '')) LIKE
+                "#,
+            );
+            builder.push_bind(pattern.as_str());
+            builder.push(
+                r#"
+      OR lower(COALESCE(so.rollout_summary, '')) LIKE
+                "#,
+            );
+            builder.push_bind(pattern.as_str());
+            builder.push(
+                r#"
+      OR lower(COALESCE(so.rollout_slug, '')) LIKE
+                "#,
+            );
+            builder.push_bind(pattern.as_str());
+
+            if !metadata_thread_ids.is_empty() {
+                builder.push(" OR so.thread_id IN (");
+                let mut separated = builder.separated(", ");
+                for thread_id in metadata_thread_ids {
+                    separated.push_bind(thread_id);
+                }
+                separated.push_unseparated(")");
+            }
+
+            builder.push(
+                r#"
+  )
+ORDER BY so.source_updated_at DESC, so.thread_id DESC
+LIMIT
+                "#,
+            );
+            builder.push_bind(limit_i64);
+            builder.build().fetch_all(self.pool.as_ref()).await?
+        } else {
+            sqlx::query(
+                r#"
+SELECT
+    so.thread_id,
+    so.source_updated_at,
+    so.raw_memory,
+    so.rollout_summary,
+    so.rollout_slug,
+    so.generated_at,
+    COALESCE(so.usage_count, 0) AS usage_count,
+    so.last_usage,
+    so.selected_for_phase2,
+    so.selected_for_phase2_source_updated_at
+FROM stage1_outputs AS so
+WHERE length(trim(so.raw_memory)) > 0 OR length(trim(so.rollout_summary)) > 0
+ORDER BY so.source_updated_at DESC, so.thread_id DESC
+LIMIT ?
+                "#,
+            )
+            .bind(limit_i64)
+            .fetch_all(self.pool.as_ref())
+            .await?
+        };
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            entries.push(self.memory_entry_from_row(&row).await?);
+        }
+        Ok(entries)
+    }
+
+    async fn memory_entry_metadata_thread_ids(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", query.to_ascii_lowercase());
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let thread_ids = sqlx::query_scalar(
+            r#"
+SELECT id
+FROM threads
+WHERE lower(COALESCE(rollout_path, '')) LIKE ?
+   OR lower(COALESCE(cwd, '')) LIKE ?
+   OR lower(COALESCE(git_branch, '')) LIKE ?
+   OR lower(COALESCE(memory_mode, '')) LIKE ?
+ORDER BY updated_at DESC, id DESC
+LIMIT ?
+            "#,
+        )
+        .bind(pattern.as_str())
+        .bind(pattern.as_str())
+        .bind(pattern.as_str())
+        .bind(pattern.as_str())
+        .bind(limit_i64)
+        .fetch_all(self.state_pool.as_ref())
+        .await?;
+        Ok(thread_ids)
+    }
+
+    async fn memory_entry_from_row(
+        &self,
+        row: &sqlx::sqlite::SqliteRow,
+    ) -> anyhow::Result<MemoryEntry> {
+        let thread_id: String = row.try_get("thread_id")?;
+        let thread_id = ThreadId::try_from(thread_id.as_str())?;
+        let source_updated_at: i64 = row.try_get("source_updated_at")?;
+        let generated_at: i64 = row.try_get("generated_at")?;
+        let last_usage: Option<i64> = row.try_get("last_usage")?;
+        let selected_for_phase2_source_updated_at: Option<i64> =
+            row.try_get("selected_for_phase2_source_updated_at")?;
+        let selected_for_phase2: i64 = row.try_get("selected_for_phase2")?;
+        let thread = self.memory_entry_thread_metadata(thread_id).await?;
+
+        Ok(MemoryEntry {
+            thread_id,
+            source_updated_at: datetime_from_epoch_seconds(source_updated_at)?,
+            raw_memory: row.try_get("raw_memory")?,
+            rollout_summary: row.try_get("rollout_summary")?,
+            rollout_slug: row.try_get("rollout_slug")?,
+            generated_at: datetime_from_epoch_seconds(generated_at)?,
+            usage_count: row.try_get("usage_count")?,
+            last_usage: last_usage.map(datetime_from_epoch_seconds).transpose()?,
+            selected_for_phase2: selected_for_phase2 != 0,
+            selected_for_phase2_source_updated_at: selected_for_phase2_source_updated_at
+                .map(datetime_from_epoch_seconds)
+                .transpose()?,
+            rollout_path: thread.as_ref().map(|thread| thread.rollout_path.clone()),
+            cwd: thread.as_ref().map(|thread| thread.cwd.clone()),
+            git_branch: thread.as_ref().and_then(|thread| thread.git_branch.clone()),
+            memory_mode: thread.and_then(|thread| thread.memory_mode),
+        })
+    }
+
+    async fn memory_entry_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> anyhow::Result<Option<MemoryEntryThreadMetadata>> {
+        let row = sqlx::query(
+            r#"
+SELECT rollout_path, cwd, git_branch, memory_mode
+FROM threads
+WHERE id = ?
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .fetch_optional(self.state_pool.as_ref())
+        .await?;
+
+        row.map(|row| {
+            Ok(MemoryEntryThreadMetadata {
+                rollout_path: PathBuf::from(row.try_get::<String, _>("rollout_path")?),
+                cwd: PathBuf::from(row.try_get::<String, _>("cwd")?),
+                git_branch: row.try_get("git_branch")?,
+                memory_mode: row.try_get("memory_mode")?,
+            })
+        })
+        .transpose()
     }
 
     /// Prunes stale stage-1 outputs while preserving the latest phase-2

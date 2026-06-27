@@ -5,6 +5,25 @@ use std::path::PathBuf;
 
 use super::ThreadMetadata;
 
+/// User-facing inventory row for a stored stage-1 memory extraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEntry {
+    pub thread_id: ThreadId,
+    pub source_updated_at: DateTime<Utc>,
+    pub raw_memory: String,
+    pub rollout_summary: String,
+    pub rollout_slug: Option<String>,
+    pub generated_at: DateTime<Utc>,
+    pub usage_count: i64,
+    pub last_usage: Option<DateTime<Utc>>,
+    pub selected_for_phase2: bool,
+    pub selected_for_phase2_source_updated_at: Option<DateTime<Utc>>,
+    pub rollout_path: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
+    pub git_branch: Option<String>,
+    pub memory_mode: Option<String>,
+}
+
 /// Stored stage-1 memory extraction output for a single thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage1Output {
