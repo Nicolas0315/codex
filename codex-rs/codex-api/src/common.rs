@@ -70,11 +70,30 @@ pub struct MemorySummarizeOutput {
     pub memory_summary: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct OutputItemDoneEvent {
+    pub item: ResponseItem,
+    pub sequence_number: Option<i64>,
+    pub output_index: Option<i64>,
+    pub response_id: Option<String>,
+}
+
+impl From<ResponseItem> for OutputItemDoneEvent {
+    fn from(item: ResponseItem) -> Self {
+        Self {
+            item,
+            sequence_number: None,
+            output_index: None,
+            response_id: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ResponseEvent {
     Created,
     SafetyBuffering(SafetyBuffering),
-    OutputItemDone(ResponseItem),
+    OutputItemDone(OutputItemDoneEvent),
     OutputItemAdded(ResponseItem),
     /// Emitted when the server includes `OpenAI-Model` on the stream response.
     /// This can differ from the requested model when backend safety routing applies.

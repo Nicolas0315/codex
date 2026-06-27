@@ -79,6 +79,7 @@ mod multi_agent_mode;
 mod network_approval;
 mod openai_file_mcp;
 mod otel;
+mod output_item_done_coalesce;
 mod override_updates;
 mod pending_input;
 mod permissions_messages;

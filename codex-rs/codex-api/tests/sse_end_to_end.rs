@@ -140,14 +140,19 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()> 
     assert_eq!(events.len(), 3);
 
     match &events[0] {
-        ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }) => {
-            assert_eq!(role, "assistant");
+        ResponseEvent::OutputItemDone(output) if matches!(&output.item, ResponseItem::Message { role, .. } if role == "assistant") =>
+            {}
+        ResponseEvent::OutputItemDone(output) => {
+            panic!("unexpected first output item: {output:?}");
         }
         other => panic!("unexpected first event: {other:?}"),
     }
 
     match &events[1] {
-        ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }) => {
+        ResponseEvent::OutputItemDone(output) => {
+            let ResponseItem::Message { role, .. } = &output.item else {
+                panic!("unexpected second output item: {output:?}");
+            };
             assert_eq!(role, "assistant");
         }
         other => panic!("unexpected second event: {other:?}"),

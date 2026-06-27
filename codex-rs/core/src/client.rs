@@ -1933,10 +1933,10 @@ where
                 break;
             };
             match event {
-                Ok(ResponseEvent::OutputItemDone(item)) => {
-                    items_added.push(item.clone());
+                Ok(ResponseEvent::OutputItemDone(event)) => {
+                    items_added.push(event.item.clone());
                     if tx_event
-                        .send(Ok(ResponseEvent::OutputItemDone(item)))
+                        .send(Ok(ResponseEvent::OutputItemDone(event)))
                         .await
                         .is_err()
                     {

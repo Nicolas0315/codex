@@ -404,12 +404,12 @@ async fn collect_compaction_output(
     let mut completed_token_usage = None;
     while let Some(event) = stream.next().await {
         match event? {
-            ResponseEvent::OutputItemDone(item) => {
+            ResponseEvent::OutputItemDone(event) => {
                 output_item_count += 1;
-                if let ResponseItem::Compaction { .. } = item {
+                if let ResponseItem::Compaction { .. } = event.item {
                     compaction_count += 1;
                     if compaction_output.is_none() {
-                        compaction_output = Some(item);
+                        compaction_output = Some(event.item);
                     }
                 }
             }
@@ -829,12 +829,15 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
         let stream = response_stream(vec![
-            Ok(ResponseEvent::OutputItemDone(message(
-                "assistant",
-                "IGNORED_COMPACT_REPLY",
-                Some(MessagePhase::FinalAnswer),
-            ))),
-            Ok(ResponseEvent::OutputItemDone(compaction.clone())),
+            Ok(ResponseEvent::OutputItemDone(
+                message(
+                    "assistant",
+                    "IGNORED_COMPACT_REPLY",
+                    Some(MessagePhase::FinalAnswer),
+                )
+                .into(),
+            )),
+            Ok(ResponseEvent::OutputItemDone(compaction.clone().into())),
             Ok(ResponseEvent::Completed {
                 response_id: "resp-compact".to_string(),
                 token_usage: Some(TokenUsage {

@@ -1,3 +1,4 @@
+use crate::OutputItemDoneEvent;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::SafetyBuffering;
@@ -163,6 +164,9 @@ pub struct ResponsesStreamEvent {
     pub(crate) headers: Option<Value>,
     metadata: Option<Value>,
     response: Option<Value>,
+    response_id: Option<String>,
+    sequence_number: Option<i64>,
+    output_index: Option<i64>,
     item: Option<Value>,
     item_id: Option<String>,
     call_id: Option<String>,
@@ -319,7 +323,12 @@ pub fn process_responses_event(
         "response.output_item.done" => {
             if let Some(item_val) = event.item {
                 if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
-                    return Ok(Some(ResponseEvent::OutputItemDone(item)));
+                    return Ok(Some(ResponseEvent::OutputItemDone(OutputItemDoneEvent {
+                        item,
+                        sequence_number: event.sequence_number,
+                        output_index: event.output_index,
+                        response_id: event.response_id,
+                    })));
                 }
                 debug!("failed to parse ResponseItem from output_item.done");
             }
@@ -726,6 +735,9 @@ mod tests {
     async fn parses_items_and_completed() {
         let item1 = json!({
             "type": "response.output_item.done",
+            "sequence_number": 3,
+            "response_id": "resp1",
+            "output_index": 0,
             "item": {
                 "type": "message",
                 "role": "assistant",
@@ -761,17 +773,25 @@ mod tests {
 
         assert_matches!(
             &events[0],
-            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
-                role,
-                phase: Some(MessagePhase::Commentary),
-                ..
-            })) if role == "assistant"
+            Ok(ResponseEvent::OutputItemDone(output)) if output.sequence_number == Some(3)
+                && output.response_id.as_deref() == Some("resp1")
+                && output.output_index == Some(0)
+                && matches!(
+                    &output.item,
+                    ResponseItem::Message {
+                        role,
+                        phase: Some(MessagePhase::Commentary),
+                        ..
+                    } if role == "assistant"
+                )
         );
 
         assert_matches!(
             &events[1],
-            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
-                if role == "assistant"
+            Ok(ResponseEvent::OutputItemDone(output)) if matches!(
+                &output.item,
+                ResponseItem::Message { role, .. } if role == "assistant"
+            )
         );
 
         match &events[2] {
@@ -841,14 +861,18 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_matches!(
             &events[0],
-            ResponseEvent::OutputItemDone(ResponseItem::ToolSearchCall {
-                call_id,
-                execution,
-                arguments,
-                ..
-            }) if call_id.as_deref() == Some("search-1")
+            ResponseEvent::OutputItemDone(output)
+                if matches!(
+                    &output.item,
+                    ResponseItem::ToolSearchCall {
+                        call_id,
+                        execution,
+                        arguments,
+                        ..
+                    } if call_id.as_deref() == Some("search-1")
                 && execution == "client"
                 && arguments == &json!({"query": "calendar create", "limit": 1})
+                )
         );
     }
 

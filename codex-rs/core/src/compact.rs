@@ -688,8 +688,8 @@ async fn drain_to_completed(
             ));
         };
         match event {
-            Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
+            Ok(ResponseEvent::OutputItemDone(event)) => {
+                sess.record_conversation_items(turn_context, std::slice::from_ref(&event.item))
                     .await;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {

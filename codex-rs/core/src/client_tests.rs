@@ -580,7 +580,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
     // item in history, so the trace should preserve it when the stream is
     // abandoned.
     let item = output_message("msg-1", "partial answer");
-    let api_stream = futures::stream::iter([Ok(ResponseEvent::OutputItemDone(item))])
+    let api_stream = futures::stream::iter([Ok(ResponseEvent::OutputItemDone(item.into()))])
         .chain(futures::stream::pending());
     let (mut stream, _) = super::map_response_events(
         /*upstream_request_id*/ None,
@@ -696,10 +696,9 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
     for _ in 0..super::RESPONSE_STREAM_CHANNEL_CAPACITY {
         events.push_back(ResponseEvent::Created);
     }
-    events.push_back(ResponseEvent::OutputItemDone(output_message(
-        "msg-1",
-        "partial answer",
-    )));
+    events.push_back(ResponseEvent::OutputItemDone(
+        output_message("msg-1", "partial answer").into(),
+    ));
     let api_stream = NotifyAfterEventStream {
         events,
         yielded: 0,

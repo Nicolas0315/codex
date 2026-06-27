@@ -1315,6 +1315,19 @@ struct SamplingRequestResult {
     last_agent_message: Option<String>,
 }
 
+struct PendingAssistantDoneSnapshot {
+    item: ResponseItem,
+    response_id: Option<String>,
+    output_index: Option<i64>,
+    previously_streamed_item: Option<TurnItem>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum OutputItemDoneAction {
+    Continue,
+    PreemptForMailbox,
+}
+
 /// Ephemeral per-response state for streaming a single proposed plan.
 /// This is intentionally not persisted or stored in session/state since it
 /// only exists while a response is actively streaming. The final plan text
@@ -1849,6 +1862,140 @@ async fn handle_assistant_item_done_in_plan_mode(
     false
 }
 
+fn assistant_snapshot_metadata(item: &ResponseItem) -> Option<(&Option<MessagePhase>, String)> {
+    match item {
+        ResponseItem::Message { role, phase, .. } if role == "assistant" => {
+            raw_assistant_output_text_from_item(item).map(|text| (phase, text))
+        }
+        _ => None,
+    }
+}
+
+fn is_assistant_done_snapshot_candidate(item: &ResponseItem) -> bool {
+    assistant_snapshot_metadata(item).is_some()
+}
+
+fn should_replace_pending_assistant_done_snapshot(
+    pending: &PendingAssistantDoneSnapshot,
+    next: &PendingAssistantDoneSnapshot,
+) -> bool {
+    let Some((pending_phase, pending_text)) = assistant_snapshot_metadata(&pending.item) else {
+        return false;
+    };
+    let Some((next_phase, next_text)) = assistant_snapshot_metadata(&next.item) else {
+        return false;
+    };
+    if pending_phase != next_phase {
+        return false;
+    }
+    if matches!(
+        (pending.item.id(), next.item.id()),
+        (Some(pending_id), Some(next_id)) if !pending_id.is_empty() && pending_id == next_id
+    ) {
+        return true;
+    }
+
+    if pending.response_id.is_some()
+        && pending.response_id == next.response_id
+        && pending.output_index.is_some()
+        && pending.output_index == next.output_index
+    {
+        return !pending_text.is_empty()
+            && next_text.len() > pending_text.len()
+            && next_text.starts_with(&pending_text);
+    }
+
+    false
+}
+
+fn align_assistant_snapshot_id_with_streamed_item(
+    item: &mut ResponseItem,
+    previously_streamed_item: &TurnItem,
+) {
+    if let ResponseItem::Message { role, id, .. } = item
+        && role == "assistant"
+        && matches!(previously_streamed_item, TurnItem::AgentMessage(_))
+    {
+        *id = Some(previously_streamed_item.id());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_output_item_done_snapshot(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    turn_store: &Arc<codex_extension_api::ExtensionData>,
+    tool_runtime: &ToolCallRuntime,
+    cancellation_token: &CancellationToken,
+    handle_responses: tracing::Span,
+    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
+    needs_follow_up: &mut bool,
+    last_agent_message: &mut Option<String>,
+    plan_mode_state: Option<&mut PlanModeStreamState>,
+    item: ResponseItem,
+    previously_streamed_item: Option<TurnItem>,
+) -> CodexResult<OutputItemDoneAction> {
+    if let Some(state) = plan_mode_state
+        && handle_assistant_item_done_in_plan_mode(
+            sess,
+            turn_context,
+            turn_store.as_ref(),
+            &item,
+            state,
+            previously_streamed_item.as_ref(),
+            last_agent_message,
+        )
+        .await
+    {
+        return Ok(OutputItemDoneAction::Continue);
+    }
+
+    let preempt_for_mailbox_mail = match &item {
+        ResponseItem::Message { role, phase, .. } => {
+            role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
+        }
+        ResponseItem::Reasoning { .. } => true,
+        ResponseItem::AgentMessage { .. } => false,
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => false,
+    };
+
+    let mut ctx = HandleOutputCtx {
+        sess: sess.clone(),
+        turn_context: turn_context.clone(),
+        turn_store: Arc::clone(turn_store),
+        tool_runtime: tool_runtime.clone(),
+        cancellation_token: cancellation_token.child_token(),
+    };
+    let output_result = handle_output_item_done(&mut ctx, item, previously_streamed_item)
+        .instrument(handle_responses)
+        .await?;
+    if let Some(tool_future) = output_result.tool_future {
+        in_flight.push_back(tool_future);
+    }
+    if let Some(agent_message) = output_result.last_agent_message {
+        *last_agent_message = Some(agent_message);
+    }
+    *needs_follow_up |= output_result.needs_follow_up;
+    // todo: remove before stabilizing multi-agent v2
+    if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
+        return Ok(OutputItemDoneAction::PreemptForMailbox);
+    }
+    Ok(OutputItemDoneAction::Continue)
+}
+
 #[instrument(level = "trace", skip_all)]
 async fn drain_in_flight(
     in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
@@ -1941,6 +2088,7 @@ async fn try_run_sampling_request(
     let defer_streamed_turn_items_for_contributors =
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
+    let mut pending_assistant_done_snapshot: Option<PendingAssistantDoneSnapshot> = None;
     let receiving_span = trace_span!("receiving_stream");
     let outcome: CodexResult<SamplingRequestResult> = loop {
         let handle_responses = trace_span!(
@@ -1964,13 +2112,74 @@ async fn try_run_sampling_request(
             .await
         {
             Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
+            Err(codex_async_utils::CancelErr::Cancelled) => {
+                if let Some(pending) = pending_assistant_done_snapshot.take()
+                    && let Err(flush_err) = process_output_item_done_snapshot(
+                        &sess,
+                        &turn_context,
+                        &turn_store,
+                        &tool_runtime,
+                        &cancellation_token,
+                        handle_responses.clone(),
+                        &mut in_flight,
+                        &mut needs_follow_up,
+                        &mut last_agent_message,
+                        plan_mode_state.as_mut(),
+                        pending.item,
+                        pending.previously_streamed_item,
+                    )
+                    .await
+                {
+                    break Err(flush_err);
+                }
+                break Err(CodexErr::TurnAborted);
+            }
         };
 
         let event = match event {
             Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
+            Some(Err(err)) => {
+                if let Some(pending) = pending_assistant_done_snapshot.take()
+                    && let Err(flush_err) = process_output_item_done_snapshot(
+                        &sess,
+                        &turn_context,
+                        &turn_store,
+                        &tool_runtime,
+                        &cancellation_token,
+                        handle_responses.clone(),
+                        &mut in_flight,
+                        &mut needs_follow_up,
+                        &mut last_agent_message,
+                        plan_mode_state.as_mut(),
+                        pending.item,
+                        pending.previously_streamed_item,
+                    )
+                    .await
+                {
+                    break Err(flush_err);
+                }
+                break Err(err);
+            }
             None => {
+                if let Some(pending) = pending_assistant_done_snapshot.take()
+                    && let Err(flush_err) = process_output_item_done_snapshot(
+                        &sess,
+                        &turn_context,
+                        &turn_store,
+                        &tool_runtime,
+                        &cancellation_token,
+                        handle_responses.clone(),
+                        &mut in_flight,
+                        &mut needs_follow_up,
+                        &mut last_agent_message,
+                        plan_mode_state.as_mut(),
+                        pending.item,
+                        pending.previously_streamed_item,
+                    )
+                    .await
+                {
+                    break Err(flush_err);
+                }
                 break Err(CodexErr::Stream(
                     "stream closed before response.completed".into(),
                     None,
@@ -1983,9 +2192,39 @@ async fn try_run_sampling_request(
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
 
+        if !matches!(event, ResponseEvent::OutputItemDone(_))
+            && let Some(pending) = pending_assistant_done_snapshot.take()
+        {
+            let action = match process_output_item_done_snapshot(
+                &sess,
+                &turn_context,
+                &turn_store,
+                &tool_runtime,
+                &cancellation_token,
+                handle_responses.clone(),
+                &mut in_flight,
+                &mut needs_follow_up,
+                &mut last_agent_message,
+                plan_mode_state.as_mut(),
+                pending.item,
+                pending.previously_streamed_item,
+            )
+            .await
+            {
+                Ok(action) => action,
+                Err(err) => break Err(err),
+            };
+            if action == OutputItemDoneAction::PreemptForMailbox {
+                break Ok(SamplingRequestResult {
+                    needs_follow_up: true,
+                    last_agent_message,
+                });
+            }
+        }
+
         match event {
             ResponseEvent::Created => {}
-            ResponseEvent::OutputItemDone(item) => {
+            ResponseEvent::OutputItemDone(output_item_done) => {
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2011,68 +2250,88 @@ async fn try_run_sampling_request(
                     )
                     .await;
                 }
-                if let Some(state) = plan_mode_state.as_mut()
-                    && handle_assistant_item_done_in_plan_mode(
-                        &sess,
-                        &turn_context,
-                        turn_store.as_ref(),
-                        &item,
-                        state,
-                        previously_streamed_item.as_ref(),
-                        &mut last_agent_message,
-                    )
-                    .await
+
+                let snapshot = PendingAssistantDoneSnapshot {
+                    item: output_item_done.item,
+                    response_id: output_item_done.response_id,
+                    output_index: output_item_done.output_index,
+                    previously_streamed_item,
+                };
+                if let Some(pending) = pending_assistant_done_snapshot.as_mut()
+                    && should_replace_pending_assistant_done_snapshot(pending, &snapshot)
                 {
+                    let previously_streamed_item = snapshot
+                        .previously_streamed_item
+                        .or_else(|| pending.previously_streamed_item.take());
+                    let mut item = snapshot.item;
+                    if let Some(previously_streamed_item) = &previously_streamed_item {
+                        align_assistant_snapshot_id_with_streamed_item(
+                            &mut item,
+                            previously_streamed_item,
+                        );
+                    }
+                    *pending = PendingAssistantDoneSnapshot {
+                        item,
+                        response_id: snapshot.response_id,
+                        output_index: snapshot.output_index,
+                        previously_streamed_item,
+                    };
                     continue;
                 }
 
-                let mut ctx = HandleOutputCtx {
-                    sess: sess.clone(),
-                    turn_context: turn_context.clone(),
-                    turn_store: Arc::clone(&turn_store),
-                    tool_runtime: tool_runtime.clone(),
-                    cancellation_token: cancellation_token.child_token(),
-                };
-
-                let preempt_for_mailbox_mail = match &item {
-                    ResponseItem::Message { role, phase, .. } => {
-                        role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
-                    }
-                    ResponseItem::Reasoning { .. } => true,
-                    ResponseItem::AgentMessage { .. } => false,
-                    ResponseItem::AdditionalTools { .. }
-                    | ResponseItem::LocalShellCall { .. }
-                    | ResponseItem::FunctionCall { .. }
-                    | ResponseItem::ToolSearchCall { .. }
-                    | ResponseItem::FunctionCallOutput { .. }
-                    | ResponseItem::CustomToolCall { .. }
-                    | ResponseItem::CustomToolCallOutput { .. }
-                    | ResponseItem::ToolSearchOutput { .. }
-                    | ResponseItem::WebSearchCall { .. }
-                    | ResponseItem::ImageGenerationCall { .. }
-                    | ResponseItem::Compaction { .. }
-                    | ResponseItem::CompactionTrigger { .. }
-                    | ResponseItem::ContextCompaction { .. }
-                    | ResponseItem::Other => false,
-                };
-
-                let output_result =
-                    match handle_output_item_done(&mut ctx, item, previously_streamed_item)
-                        .instrument(handle_responses)
-                        .await
+                if let Some(pending) = pending_assistant_done_snapshot.take() {
+                    let action = match process_output_item_done_snapshot(
+                        &sess,
+                        &turn_context,
+                        &turn_store,
+                        &tool_runtime,
+                        &cancellation_token,
+                        handle_responses.clone(),
+                        &mut in_flight,
+                        &mut needs_follow_up,
+                        &mut last_agent_message,
+                        plan_mode_state.as_mut(),
+                        pending.item,
+                        pending.previously_streamed_item,
+                    )
+                    .await
                     {
-                        Ok(output_result) => output_result,
+                        Ok(action) => action,
                         Err(err) => break Err(err),
                     };
-                if let Some(tool_future) = output_result.tool_future {
-                    in_flight.push_back(tool_future);
+                    if action == OutputItemDoneAction::PreemptForMailbox {
+                        break Ok(SamplingRequestResult {
+                            needs_follow_up: true,
+                            last_agent_message,
+                        });
+                    }
                 }
-                if let Some(agent_message) = output_result.last_agent_message {
-                    last_agent_message = Some(agent_message);
+
+                if is_assistant_done_snapshot_candidate(&snapshot.item) {
+                    pending_assistant_done_snapshot = Some(snapshot);
+                    continue;
                 }
-                needs_follow_up |= output_result.needs_follow_up;
-                // todo: remove before stabilizing multi-agent v2
-                if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
+
+                let action = match process_output_item_done_snapshot(
+                    &sess,
+                    &turn_context,
+                    &turn_store,
+                    &tool_runtime,
+                    &cancellation_token,
+                    handle_responses.clone(),
+                    &mut in_flight,
+                    &mut needs_follow_up,
+                    &mut last_agent_message,
+                    plan_mode_state.as_mut(),
+                    snapshot.item,
+                    snapshot.previously_streamed_item,
+                )
+                .await
+                {
+                    Ok(action) => action,
+                    Err(err) => break Err(err),
+                };
+                if action == OutputItemDoneAction::PreemptForMailbox {
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
