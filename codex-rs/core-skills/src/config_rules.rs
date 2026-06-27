@@ -31,11 +31,13 @@ pub fn skill_config_rules_from_stack(config_layer_stack: &ConfigLayerStack) -> S
     let mut entries = Vec::new();
     for layer in config_layer_stack.get_layers(
         ConfigLayerStackOrdering::LowestPrecedenceFirst,
-        /*include_disabled*/ true,
+        /*include_disabled*/ false,
     ) {
         if !matches!(
             layer.name,
-            ConfigLayerSource::User { .. } | ConfigLayerSource::SessionFlags
+            ConfigLayerSource::User { .. }
+                | ConfigLayerSource::Project { .. }
+                | ConfigLayerSource::SessionFlags
         ) {
             continue;
         }

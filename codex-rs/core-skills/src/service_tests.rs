@@ -144,6 +144,15 @@ fn config_stack_with_session_flags(
     .expect("valid config layer stack")
 }
 
+fn project_config_layer(dot_codex_folder: &Path, config_toml: &str) -> ConfigLayerEntry {
+    ConfigLayerEntry::new(
+        ConfigLayerSource::Project {
+            dot_codex_folder: dot_codex_folder.abs(),
+        },
+        toml::from_str(config_toml).expect("project layer toml"),
+    )
+}
+
 fn path_toggle_config(path: &std::path::Path, enabled: bool) -> String {
     format!(
         r#"[[skills.config]]
@@ -669,6 +678,66 @@ fn disabled_paths_for_skills_allows_session_flags_to_override_user_layer() {
 
 #[cfg_attr(windows, ignore)]
 #[test]
+fn disabled_paths_for_skills_allows_project_layer_to_override_user_layer() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let project_codex = tempdir.path().join("project/.codex");
+    fs::create_dir_all(&project_codex).expect("create project config dir");
+    let skill_path = write_demo_skill(&tempdir);
+    let skill = test_skill("demo-skill", skill_path.clone());
+    let user_layer = user_config_layer(&codex_home, &name_toggle_config("demo-skill", false));
+    let project_layer =
+        project_config_layer(&project_codex, &name_toggle_config("demo-skill", true));
+    let stack = ConfigLayerStack::new(
+        vec![user_layer, project_layer],
+        Default::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+
+    let skill_config_rules = skill_config_rules_from_stack(&stack);
+    assert_eq!(
+        resolve_disabled_skill_paths(&[skill], &skill_config_rules),
+        HashSet::new()
+    );
+}
+
+#[cfg_attr(windows, ignore)]
+#[test]
+fn disabled_paths_for_skills_ignores_disabled_project_layer_override() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let project_codex = tempdir.path().join("project/.codex");
+    fs::create_dir_all(&project_codex).expect("create project config dir");
+    let skill_path = write_demo_skill(&tempdir);
+    let skill = test_skill("demo-skill", skill_path.clone());
+    let user_layer = user_config_layer(&codex_home, &name_toggle_config("demo-skill", false));
+    let project_layer = ConfigLayerEntry::new_disabled(
+        ConfigLayerSource::Project {
+            dot_codex_folder: project_codex.abs(),
+        },
+        toml::from_str(&name_toggle_config("demo-skill", true)).expect("project layer toml"),
+        "project config is not trusted",
+    );
+    let stack = ConfigLayerStack::new(
+        vec![user_layer, project_layer],
+        Default::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+
+    let skill_config_rules = skill_config_rules_from_stack(&stack);
+    assert_eq!(
+        resolve_disabled_skill_paths(&[skill], &skill_config_rules),
+        HashSet::from([skill_path
+            .abs()
+            .canonicalize()
+            .expect("skill path should canonicalize")])
+    );
+}
+
+#[cfg_attr(windows, ignore)]
+#[test]
 fn disabled_paths_for_skills_allows_session_flags_to_disable_user_enabled_skill() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let skill_path = write_demo_skill(&tempdir);
@@ -825,4 +894,42 @@ async fn skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill()
         .find(|skill| skill.name == "demo-skill")
         .expect("demo skill should be discovered");
     assert_eq!(child_outcome.is_skill_enabled(child_skill), true);
+}
+
+#[cfg_attr(windows, ignore)]
+#[tokio::test]
+async fn skills_for_config_allows_project_layer_to_reenable_user_disabled_skill() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let project_codex = cwd.path().join(".codex");
+    fs::create_dir_all(&project_codex).expect("create project config dir");
+    let skill_dir = codex_home.path().join("skills").join("demo");
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    let skill_path = skill_dir.join("SKILL.md");
+    fs::write(
+        &skill_path,
+        "---\nname: demo-skill\ndescription: demo description\n---\n\n# Body\n",
+    )
+    .expect("write skill");
+    let user_layer = user_config_layer(&codex_home, &name_toggle_config("demo-skill", false));
+    let project_layer =
+        project_config_layer(&project_codex, &name_toggle_config("demo-skill", true));
+    let stack = ConfigLayerStack::new(
+        vec![user_layer, project_layer],
+        Default::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+    let skills_service = SkillsService::new(
+        codex_home.path().abs(),
+        /*bundled_skills_enabled*/ true,
+    );
+
+    let outcome = skills_for_config_with_stack(&skills_service, &cwd, &stack, &[]).await;
+    let skill = outcome
+        .skills
+        .iter()
+        .find(|skill| skill.name == "demo-skill")
+        .expect("demo skill should be discovered");
+    assert_eq!(outcome.is_skill_enabled(skill), true);
 }
