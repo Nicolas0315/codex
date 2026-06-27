@@ -1,6 +1,6 @@
 use super::MarketplaceAddError;
 use super::source::MarketplaceSource;
-use crate::installed_marketplaces::resolve_configured_marketplace_root;
+use crate::installed_marketplaces::resolve_configured_marketplace_root_from_config;
 use crate::marketplace::validate_marketplace_root;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::MarketplaceConfigUpdate;
@@ -82,9 +82,11 @@ pub(super) fn installed_marketplace_root_for_source(
         if !install_metadata.matches_config(marketplace) {
             continue;
         }
-        let Some(root) =
-            resolve_configured_marketplace_root(marketplace_name, marketplace, install_root)
-        else {
+        let Some(root) = resolve_configured_marketplace_root_from_config(
+            marketplace_name,
+            marketplace,
+            install_root,
+        ) else {
             continue;
         };
         if validate_marketplace_root(&root).is_ok() {
@@ -125,9 +127,11 @@ pub(super) fn find_marketplace_root_by_name(
         return Ok(None);
     };
 
-    let Some(root) =
-        resolve_configured_marketplace_root(marketplace_name, marketplace, install_root)
-    else {
+    let Some(root) = resolve_configured_marketplace_root_from_config(
+        marketplace_name,
+        marketplace,
+        install_root,
+    ) else {
         return Ok(None);
     };
     if validate_marketplace_root(&root).is_ok() {

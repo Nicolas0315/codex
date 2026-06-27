@@ -358,6 +358,7 @@ fn configured_marketplace_sources_by_root(
         .filter_map(|(marketplace_name, marketplace)| {
             let marketplace_source = marketplace_sources.get(marketplace_name)?;
             let root = resolve_configured_marketplace_root(
+                codex_home,
                 marketplace_name,
                 marketplace,
                 &default_install_root,

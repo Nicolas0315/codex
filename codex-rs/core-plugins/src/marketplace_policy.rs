@@ -129,6 +129,7 @@ impl MarketplacePolicy {
         self.validate_configured_marketplace(marketplace_name, marketplace)?;
 
         let configured_root = resolve_configured_marketplace_root(
+            codex_home,
             marketplace_name,
             marketplace,
             &marketplace_install_root(codex_home),

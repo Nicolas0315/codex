@@ -1,3 +1,5 @@
+use crate::OPENAI_BUNDLED_ALPHA_MARKETPLACE_NAME;
+use crate::OPENAI_BUNDLED_MARKETPLACE_NAME;
 use crate::installed_marketplaces::marketplace_install_root;
 use crate::marketplace_policy::validate_marketplace_name_for_add;
 use crate::marketplace_policy::validate_marketplace_source_for_add;
@@ -135,7 +137,9 @@ where
         let marketplace_name = validate_marketplace_source_root(path)?;
         validate_marketplace_name_for_add(managed_marketplace_name, &marketplace_name)
             .map_err(MarketplaceAddError::InvalidRequest)?;
-        if find_marketplace_root_by_name(codex_home, &install_root, &marketplace_name)?.is_some() {
+        if find_marketplace_root_by_name(codex_home, &install_root, &marketplace_name)?.is_some()
+            && !is_refreshable_bundled_marketplace(&marketplace_name)
+        {
             return Err(MarketplaceAddError::InvalidRequest(format!(
                 "marketplace '{marketplace_name}' is already added from a different source; remove it before adding this source"
             )));
@@ -212,6 +216,13 @@ where
         })?,
         already_added: false,
     })
+}
+
+fn is_refreshable_bundled_marketplace(marketplace_name: &str) -> bool {
+    matches!(
+        marketplace_name,
+        OPENAI_BUNDLED_MARKETPLACE_NAME | OPENAI_BUNDLED_ALPHA_MARKETPLACE_NAME
+    )
 }
 
 #[cfg(test)]
@@ -429,23 +440,134 @@ url = "https://github.com/example/allowed.git"
         Ok(())
     }
 
+    #[test]
+    fn add_marketplace_sync_refreshes_bundled_local_source() -> Result<()> {
+        let codex_home = TempDir::new()?;
+        let old_source_root = TempDir::new()?;
+        let new_source_root = TempDir::new()?;
+        write_named_marketplace_source(
+            old_source_root.path(),
+            OPENAI_BUNDLED_MARKETPLACE_NAME,
+            "old bundled copy",
+        )?;
+        write_named_marketplace_source(
+            new_source_root.path(),
+            OPENAI_BUNDLED_MARKETPLACE_NAME,
+            "new bundled copy",
+        )?;
+
+        let old_request = MarketplaceAddRequest {
+            source: old_source_root.path().display().to_string(),
+            ref_name: None,
+            sparse_paths: Vec::new(),
+        };
+        let new_request = MarketplaceAddRequest {
+            source: new_source_root.path().display().to_string(),
+            ref_name: None,
+            sparse_paths: Vec::new(),
+        };
+        let requirements = ConfigRequirements::default();
+        add_marketplace_sync_with_cloner(
+            codex_home.path(),
+            &requirements,
+            old_request,
+            |_url, _ref_name, _sparse_paths, _destination| {
+                panic!("git cloner should not be called for local marketplace sources")
+            },
+        )?;
+        let result = add_marketplace_sync_with_cloner(
+            codex_home.path(),
+            &requirements,
+            new_request,
+            |_url, _ref_name, _sparse_paths, _destination| {
+                panic!("git cloner should not be called for local marketplace sources")
+            },
+        )?;
+
+        let expected_source = new_source_root.path().canonicalize()?.display().to_string();
+        assert_eq!(result.marketplace_name, OPENAI_BUNDLED_MARKETPLACE_NAME);
+        assert!(!result.already_added);
+        let config = fs::read_to_string(codex_home.path().join(codex_config::CONFIG_TOML_FILE))?;
+        let config: toml::Value = toml::from_str(&config)?;
+        assert_eq!(
+            config["marketplaces"][OPENAI_BUNDLED_MARKETPLACE_NAME]["source"].as_str(),
+            Some(expected_source.as_str())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_marketplace_sync_rejects_custom_local_source_refresh() -> Result<()> {
+        let codex_home = TempDir::new()?;
+        let old_source_root = TempDir::new()?;
+        let new_source_root = TempDir::new()?;
+        write_marketplace_source(old_source_root.path(), "old local copy")?;
+        write_marketplace_source(new_source_root.path(), "new local copy")?;
+
+        let requirements = ConfigRequirements::default();
+        add_marketplace_sync_with_cloner(
+            codex_home.path(),
+            &requirements,
+            MarketplaceAddRequest {
+                source: old_source_root.path().display().to_string(),
+                ref_name: None,
+                sparse_paths: Vec::new(),
+            },
+            |_url, _ref_name, _sparse_paths, _destination| {
+                panic!("git cloner should not be called for local marketplace sources")
+            },
+        )?;
+        let err = add_marketplace_sync_with_cloner(
+            codex_home.path(),
+            &requirements,
+            MarketplaceAddRequest {
+                source: new_source_root.path().display().to_string(),
+                ref_name: None,
+                sparse_paths: Vec::new(),
+            },
+            |_url, _ref_name, _sparse_paths, _destination| {
+                panic!("git cloner should not be called for local marketplace sources")
+            },
+        )
+        .expect_err("custom marketplaces should still reject same-name source changes");
+
+        assert!(
+            err.to_string()
+                .contains("already added from a different source"),
+            "unexpected error: {err}"
+        );
+
+        Ok(())
+    }
+
     fn write_marketplace_source(source: &Path, marker: &str) -> std::io::Result<()> {
+        write_named_marketplace_source(source, "debug", marker)
+    }
+
+    fn write_named_marketplace_source(
+        source: &Path,
+        marketplace_name: &str,
+        marker: &str,
+    ) -> std::io::Result<()> {
         fs::create_dir_all(source.join(".agents/plugins"))?;
         fs::create_dir_all(source.join("plugins/sample/.codex-plugin"))?;
         fs::write(
             source.join(".agents/plugins/marketplace.json"),
-            r#"{
-  "name": "debug",
+            format!(
+                r#"{{
+  "name": "{marketplace_name}",
   "plugins": [
-    {
+    {{
       "name": "sample",
-      "source": {
+      "source": {{
         "source": "local",
         "path": "./plugins/sample"
-      }
-    }
+      }}
+    }}
   ]
-}"#,
+}}"#
+            ),
         )?;
         fs::write(
             source.join("plugins/sample/.codex-plugin/plugin.json"),

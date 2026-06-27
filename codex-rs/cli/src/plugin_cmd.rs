@@ -784,6 +784,7 @@ pub(crate) fn configured_marketplace_snapshot_issues(
             continue;
         }
         let Some(root) = resolve_configured_marketplace_root(
+            codex_home,
             configured_name,
             marketplace,
             &default_install_root,
