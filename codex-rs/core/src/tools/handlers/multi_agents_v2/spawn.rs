@@ -61,9 +61,6 @@ async fn handle_spawn_agent(
     let child_depth = next_thread_spawn_depth(&session_source);
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    if let Some(service_tier) = args.service_tier.as_ref() {
-        config.service_tier = Some(service_tier.clone());
-    }
     if matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)) {
         reject_full_fork_spawn_overrides(
             role_name,

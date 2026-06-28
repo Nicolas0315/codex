@@ -11,6 +11,7 @@ use crate::tools::context::ToolPayload;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseInputItem;
@@ -331,9 +332,21 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     parent_service_tier: Option<&str>,
     requested_service_tier: Option<&str>,
 ) -> Result<(), FunctionCallError> {
+    if let Some(requested_service_tier) = requested_service_tier
+        && parent_service_tier != Some(requested_service_tier)
+        && config.service_tier.as_deref() != Some(requested_service_tier)
+        && !(parent_service_tier.is_none()
+            && requested_service_tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE)
+    {
+        let inherited_service_tier =
+            parent_service_tier.unwrap_or(SERVICE_TIER_DEFAULT_REQUEST_VALUE);
+        return Err(FunctionCallError::RespondToModel(format!(
+            "spawn_agent cannot change service_tier from the inherited parent value `{inherited_service_tier}` to `{requested_service_tier}`; omit service_tier to inherit the parent setting."
+        )));
+    }
+
     let candidate_service_tiers = [
         config.service_tier.clone(),
-        requested_service_tier.map(str::to_string),
         parent_service_tier.map(str::to_string),
     ];
     if candidate_service_tiers.iter().all(Option::is_none) {

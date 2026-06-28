@@ -14,8 +14,6 @@ const MULTI_AGENT_V1_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and manag
 const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.";
 const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
-const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
-    "Service tier override for the new agent. Omit unless explicitly requested.";
 const MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION: usize = 5;
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
@@ -583,12 +581,6 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
                     .to_string(),
             )),
         ),
-        (
-            "service_tier".to_string(),
-            JsonSchema::string(Some(
-                SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION.to_string(),
-            )),
-        ),
     ])
 }
 
@@ -623,12 +615,6 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
                     .to_string(),
-            )),
-        ),
-        (
-            "service_tier".to_string(),
-            JsonSchema::string(Some(
-                SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION.to_string(),
             )),
         ),
     ])

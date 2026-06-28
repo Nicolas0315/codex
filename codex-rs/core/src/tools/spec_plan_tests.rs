@@ -1218,12 +1218,13 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
-    for property in ["agent_type", "model", "reasoning_effort", "service_tier"] {
+    for property in ["agent_type", "model", "reasoning_effort"] {
         assert!(
             properties.contains_key(property),
             "expected v1 spawn_agent to expose `{property}`"
         );
     }
+    assert!(!properties.contains_key("service_tier"));
 
     let v2 = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
@@ -1274,6 +1275,12 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         panic!("expected spawn_agent in {MULTI_AGENT_V2_NAMESPACE} namespace");
     };
     let spawn_agent_description = spawn_agent.description.as_str();
+    let properties = spawn_agent
+        .parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+    assert!(!properties.contains_key("service_tier"));
     assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
     assert!(spawn_agent_description.contains(
         "Note that passing `fork_turns=\"none\"` will not pass any surrounding context to the spawned subagent"

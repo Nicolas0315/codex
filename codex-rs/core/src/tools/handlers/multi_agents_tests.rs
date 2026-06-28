@@ -467,14 +467,43 @@ async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_over
 }
 
 #[tokio::test]
-async fn spawn_agent_service_tier_override_validates_the_effective_child_model() {
+async fn spawn_agent_service_tier_request_must_match_parent_and_supported_child_model() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
     }
 
     {
-        let (mut session, turn) = make_session_and_context().await;
+        let (session, turn) = make_session_and_context().await;
+        let err = SpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "inspect this repo",
+                    "model": "gpt-5.4",
+                    "service_tier": ServiceTier::Fast.request_value()
+                })),
+            ))
+            .await
+            .err()
+            .expect("spawn_agent should reject service tier escalation from the default tier");
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "spawn_agent cannot change service_tier from the inherited parent value `default` to `priority`; omit service_tier to inherit the parent setting."
+                    .to_string()
+            )
+        );
+    }
+
+    {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let mut config = (*turn.config).clone();
+        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        turn.config = Arc::new(config);
         let manager = thread_manager();
         let root = manager
             .start_thread((*turn.config).clone())
@@ -495,7 +524,7 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
                 })),
             ))
             .await
-            .expect("spawn_agent should accept a supported explicit service tier");
+            .expect("spawn_agent should accept the inherited parent service tier");
         let (content, _) = expect_text_output(output);
         let result: SpawnAgentResult =
             serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -513,7 +542,10 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (session, turn) = make_session_and_context().await;
+        let (session, mut turn) = make_session_and_context().await;
+        let mut config = (*turn.config).clone();
+        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        turn.config = Arc::new(config);
         let err = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
@@ -532,14 +564,17 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
         assert_eq!(
             err,
             FunctionCallError::RespondToModel(
-                "Service tier `turbo` is not supported for model `gpt-5.4`. Supported service tiers: priority"
+                "spawn_agent cannot change service_tier from the inherited parent value `priority` to `turbo`; omit service_tier to inherit the parent setting."
                     .to_string()
             )
         );
     }
 
     {
-        let (session, turn) = make_session_and_context().await;
+        let (session, mut turn) = make_session_and_context().await;
+        let mut config = (*turn.config).clone();
+        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        turn.config = Arc::new(config);
         let err = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
@@ -563,6 +598,47 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
             )
         );
     }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_agent_rejects_service_tier_escalation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "fast_child",
+                "service_tier": ServiceTier::Fast.request_value()
+            })),
+        ))
+        .await
+        .err()
+        .expect("spawn_agent should reject service tier escalation from the default tier");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "spawn_agent cannot change service_tier from the inherited parent value `default` to `priority`; omit service_tier to inherit the parent setting."
+                .to_string()
+        )
+    );
 }
 
 #[tokio::test]
@@ -837,23 +913,26 @@ service_tier = "priority"
     assert_eq!(
         result.err(),
         Some(FunctionCallError::RespondToModel(
-            "Service tier `turbo` is not supported for model `gpt-5.4`. Supported service tiers: priority"
+            "spawn_agent cannot change service_tier from the inherited parent value `default` to `turbo`; omit service_tier to inherit the parent setting."
                 .to_string()
         ))
     );
 }
 
 #[tokio::test]
-async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
+async fn spawn_agent_full_history_fork_accepts_matching_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
     }
 
     let (mut session, turn) = make_session_and_context().await;
-    let turn = turn
+    let mut turn = turn
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
         .await;
+    let mut config = (*turn.config).clone();
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    turn.config = Arc::new(config);
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -874,7 +953,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
             })),
         ))
         .await
-        .expect("full-history fork should accept explicit service tier");
+        .expect("full-history fork should accept the inherited service tier");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -892,7 +971,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+async fn multi_agent_v2_full_history_fork_accepts_matching_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
@@ -903,6 +982,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
         .await;
     let mut config = (*turn.config).clone();
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
     config
         .features
         .enable(Feature::MultiAgentV2)
