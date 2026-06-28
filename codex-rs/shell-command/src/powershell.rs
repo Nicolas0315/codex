@@ -17,9 +17,10 @@ pub fn prefix_powershell_script_with_utf8(command: &[String]) -> Vec<String> {
         return command.to_vec();
     };
 
+    let script = quote_git_revspecs_for_powershell(script);
     let trimmed = script.trim_start();
     let script = if trimmed.starts_with(UTF8_OUTPUT_PREFIX) {
-        script.to_string()
+        script
     } else {
         format!("{UTF8_OUTPUT_PREFIX}{script}")
     };
@@ -30,6 +31,160 @@ pub fn prefix_powershell_script_with_utf8(command: &[String]) -> Vec<String> {
         .collect();
     command.push(script);
     command
+}
+
+fn quote_git_revspecs_for_powershell(script: &str) -> String {
+    let mut out = String::with_capacity(script.len());
+    let mut chars = script.chars().peekable();
+    let mut unquoted = String::new();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                out.push_str(&quote_git_revspecs_in_unquoted_powershell(&unquoted));
+                unquoted.clear();
+                out.push(ch);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            out.push(chars.next().expect("peeked single quote"));
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '"' => {
+                out.push_str(&quote_git_revspecs_in_unquoted_powershell(&unquoted));
+                unquoted.clear();
+                out.push(ch);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == '`' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    } else if inner == '"' {
+                        break;
+                    }
+                }
+            }
+            '#' => {
+                out.push_str(&quote_git_revspecs_in_unquoted_powershell(&unquoted));
+                unquoted.clear();
+                out.push(ch);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == '\n' {
+                        break;
+                    }
+                }
+            }
+            _ => unquoted.push(ch),
+        }
+    }
+
+    out.push_str(&quote_git_revspecs_in_unquoted_powershell(&unquoted));
+    out
+}
+
+fn quote_git_revspecs_in_unquoted_powershell(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    let mut command_position = true;
+    let mut in_git_command = false;
+
+    for ch in text.chars() {
+        if is_powershell_revspec_brace(ch, &token) {
+            token.push(ch);
+        } else if is_powershell_token_separator(ch) {
+            flush_powershell_token(
+                &mut out,
+                &mut token,
+                &mut command_position,
+                &mut in_git_command,
+            );
+            out.push(ch);
+            if is_powershell_command_separator(ch) {
+                command_position = true;
+                in_git_command = false;
+            }
+        } else {
+            token.push(ch);
+        }
+    }
+
+    flush_powershell_token(
+        &mut out,
+        &mut token,
+        &mut command_position,
+        &mut in_git_command,
+    );
+    out
+}
+
+fn is_powershell_revspec_brace(ch: char, token: &str) -> bool {
+    (ch == '{' && token.ends_with('@')) || (ch == '}' && token.contains("@{"))
+}
+
+fn flush_powershell_token(
+    out: &mut String,
+    token: &mut String,
+    command_position: &mut bool,
+    in_git_command: &mut bool,
+) {
+    if token.is_empty() {
+        return;
+    }
+
+    let is_git = is_git_executable_token(token);
+    if *command_position {
+        *in_git_command = is_git;
+        *command_position = false;
+    }
+
+    if *in_git_command && !is_git && is_unquoted_git_revspec_with_braces(token) {
+        out.push('\'');
+        out.push_str(&token.replace('\'', "''"));
+        out.push('\'');
+    } else {
+        out.push_str(token);
+    }
+
+    token.clear();
+}
+
+fn is_powershell_token_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')' | '{' | '}')
+}
+
+fn is_powershell_command_separator(ch: char) -> bool {
+    matches!(ch, '\r' | '\n' | ';' | '|' | '&' | '(' | ')' | '{' | '}')
+}
+
+fn is_git_executable_token(token: &str) -> bool {
+    let normalized = token
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(token)
+        .to_ascii_lowercase();
+    matches!(normalized.as_str(), "git" | "git.exe")
+}
+
+fn is_unquoted_git_revspec_with_braces(token: &str) -> bool {
+    let Some(start) = token.find("@{") else {
+        return false;
+    };
+    let Some(relative_end) = token[start + 2..].find('}') else {
+        return false;
+    };
+    let content = &token[start + 2..start + 2 + relative_end];
+    !content.is_empty() && content.chars().all(is_git_revspec_brace_char)
+}
+
+fn is_git_revspec_brace_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')
 }
 
 /// Extract the PowerShell script body from an invocation such as:
@@ -157,6 +312,7 @@ mod tests {
     #[cfg(windows)]
     use super::parse_powershell_command_into_plain_commands;
     use super::prefix_powershell_script_with_utf8;
+    use super::quote_git_revspecs_for_powershell;
 
     #[test]
     fn extracts_basic_powershell_command() {
@@ -234,6 +390,80 @@ mod tests {
         ];
 
         assert_eq!(prefix_powershell_script_with_utf8(&cmd), cmd);
+    }
+
+    #[test]
+    fn quotes_unquoted_git_upstream_revspec() {
+        assert_eq!(
+            quote_git_revspecs_for_powershell(
+                "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+            ),
+            "git rev-parse --abbrev-ref --symbolic-full-name '@{u}'"
+        );
+    }
+
+    #[test]
+    fn prefix_quotes_git_revspec_before_powershell_execution() {
+        let cmd = vec![
+            "powershell".to_string(),
+            "-Command".to_string(),
+            "git rev-parse --abbrev-ref --symbolic-full-name @{u}".to_string(),
+        ];
+
+        let prefixed = prefix_powershell_script_with_utf8(&cmd);
+
+        assert_eq!(
+            prefixed,
+            vec![
+                "powershell".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "{UTF8_OUTPUT_PREFIX}git rev-parse --abbrev-ref --symbolic-full-name '@{{u}}'"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn quotes_git_revspecs_inside_subexpressions() {
+        assert_eq!(
+            quote_git_revspecs_for_powershell(
+                "Write-Output $(git rev-parse --abbrev-ref --symbolic-full-name @{upstream})"
+            ),
+            "Write-Output $(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}')"
+        );
+    }
+
+    #[test]
+    fn quotes_git_revspecs_inside_script_blocks() {
+        assert_eq!(
+            quote_git_revspecs_for_powershell("try { git rev-parse @{u} } catch {}"),
+            "try { git rev-parse '@{u}' } catch {}"
+        );
+    }
+
+    #[test]
+    fn quotes_reflog_and_push_revspecs_for_git() {
+        assert_eq!(
+            quote_git_revspecs_for_powershell("git rev-parse HEAD@{0}; git rev-parse @{push}"),
+            "git rev-parse 'HEAD@{0}'; git rev-parse '@{push}'"
+        );
+    }
+
+    #[test]
+    fn leaves_quoted_git_revspecs_alone() {
+        assert_eq!(
+            quote_git_revspecs_for_powershell("git rev-parse '@{u}'"),
+            "git rev-parse '@{u}'"
+        );
+    }
+
+    #[test]
+    fn leaves_non_git_powershell_hashtable_alone() {
+        assert_eq!(
+            quote_git_revspecs_for_powershell("Write-Output @{u=1}"),
+            "Write-Output @{u=1}"
+        );
     }
 
     #[cfg(windows)]
