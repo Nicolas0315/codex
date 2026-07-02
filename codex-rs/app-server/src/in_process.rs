@@ -90,6 +90,7 @@ pub use codex_rollout::StateDbHandle;
 pub use codex_state::log_db::LogDbLayer;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use toml::Value as TomlValue;
 use tracing::warn;
@@ -703,14 +704,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             )));
         }
 
-        if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut processor_handle).await {
-            processor_handle.abort();
-            let _ = processor_handle.await;
-        }
-        if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut outbound_handle).await {
-            outbound_handle.abort();
-            let _ = outbound_handle.await;
-        }
+        wait_for_runtime_shutdown_handles(&mut processor_handle, &mut outbound_handle).await;
 
         if let Some(done_tx) = shutdown_ack {
             let _ = done_tx.send(());
@@ -724,6 +718,39 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         #[cfg(test)]
         _test_codex_home: None,
     })
+}
+
+async fn wait_for_runtime_shutdown_handles(
+    processor_handle: &mut JoinHandle<()>,
+    outbound_handle: &mut JoinHandle<()>,
+) {
+    wait_for_runtime_shutdown_handles_with_timeout(
+        processor_handle,
+        outbound_handle,
+        SHUTDOWN_TIMEOUT,
+    )
+    .await;
+}
+
+async fn wait_for_runtime_shutdown_handles_with_timeout(
+    processor_handle: &mut JoinHandle<()>,
+    outbound_handle: &mut JoinHandle<()>,
+    shutdown_timeout: Duration,
+) {
+    let processor_done = &mut *processor_handle;
+    let outbound_done = &mut *outbound_handle;
+    if timeout(shutdown_timeout, async {
+        let _ = processor_done.await;
+        let _ = outbound_done.await;
+    })
+    .await
+    .is_err()
+    {
+        processor_handle.abort();
+        outbound_handle.abort();
+        let _ = processor_handle.await;
+        let _ = outbound_handle.await;
+    }
 }
 
 #[cfg(test)]
@@ -742,6 +769,7 @@ mod tests {
     use codex_core::config::ConfigBuilder;
     use pretty_assertions::assert_eq;
     use std::path::Path;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     async fn build_test_config(codex_home: &Path) -> Config {
@@ -822,6 +850,32 @@ mod tests {
             .shutdown()
             .await
             .expect("in-process runtime should shutdown cleanly");
+    }
+
+    #[tokio::test]
+    async fn shutdown_processor_and_outbound_share_one_timeout() {
+        let shutdown_timeout = Duration::from_millis(20);
+        let mut processor_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let mut outbound_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let started_at = Instant::now();
+        wait_for_runtime_shutdown_handles_with_timeout(
+            &mut processor_handle,
+            &mut outbound_handle,
+            shutdown_timeout,
+        )
+        .await;
+
+        assert!(
+            started_at.elapsed() < shutdown_timeout + Duration::from_secs(1),
+            "shutdown should not wait one timeout per handle"
+        );
+        assert!(processor_handle.is_finished());
+        assert!(outbound_handle.is_finished());
     }
 
     #[tokio::test]
