@@ -28,6 +28,7 @@ use std::time::UNIX_EPOCH;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::Event;
+use tracing::Level;
 use tracing::field::Field;
 use tracing::field::Visit;
 use tracing::level_filters::LevelFilter;
@@ -50,16 +51,72 @@ const LOG_QUEUE_CAPACITY: usize = 512;
 const LOG_BATCH_SIZE: usize = 128;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Environment variable controlling the level persisted into the SQLite log DB.
+///
+/// Takes `RUST_LOG`-style [`Targets`] directives, so `off`, `warn`, and
+/// `warn,codex_core=info` all work.
+///
+/// `RUST_LOG` itself is deliberately not reused. It drives stderr verbosity, and
+/// a value set for that purpose would silently degrade the diagnostics
+/// `/feedback` reads. Worse, `Targets` derives no default level from a value
+/// without a bare level (`codex_core=debug`), so reusing `RUST_LOG` would
+/// silence the sink for every target the user did not name.
+pub const SQLITE_LOG_ENV: &str = "CODEX_SQLITE_LOG";
+
+/// Level the persisted sink uses when [`SQLITE_LOG_ENV`] is unset or unusable.
+const DEFAULT_PERSISTED_LEVEL: LevelFilter = LevelFilter::TRACE;
+
+/// Per-target ceilings for the persisted sink.
+///
+/// These targets are churn rather than diagnostics: bridged `log` records
+/// duplicate events already stored under their real target, the `codex_otel`
+/// targets are exported through OTel instead, and the rest are high-frequency
+/// dumps that evict the entries `/feedback` actually reads. They are ceilings
+/// and never floors, so a stricter [`SQLITE_LOG_ENV`] still wins.
+const NOISY_TARGET_CEILINGS: &[(&str, LevelFilter)] = &[
+    ("hyper_util", LevelFilter::WARN),
+    ("log", LevelFilter::OFF),
+    ("codex_otel.log_only", LevelFilter::OFF),
+    ("codex_otel.trace_safe", LevelFilter::OFF),
+    ("rmcp::service", LevelFilter::INFO),
+    ("codex_api::responses_websocket_timing", LevelFilter::OFF),
+    ("codex_core::post_sampling_token_estimate", LevelFilter::OFF),
+];
+
 pub fn default_filter() -> Targets {
-    Targets::new()
-        .with_default(LevelFilter::TRACE)
-        .with_target("hyper_util", LevelFilter::WARN)
-        .with_target("log", LevelFilter::OFF)
-        .with_target("codex_otel.log_only", LevelFilter::OFF)
-        .with_target("codex_otel.trace_safe", LevelFilter::OFF)
-        .with_target("rmcp::service", LevelFilter::INFO)
-        .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
-        .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF)
+    filter_from_directives(std::env::var(SQLITE_LOG_ENV).ok().as_deref())
+}
+
+fn filter_from_directives(configured: Option<&str>) -> Targets {
+    let base = configured
+        .map(str::trim)
+        .filter(|directives| !directives.is_empty())
+        .and_then(|directives| directives.parse::<Targets>().ok())
+        .unwrap_or_else(|| Targets::new().with_default(DEFAULT_PERSISTED_LEVEL));
+
+    NOISY_TARGET_CEILINGS
+        .iter()
+        .fold(base.clone(), |targets, (target, ceiling)| {
+            targets.with_target(*target, requested_level(&base, target).min(*ceiling))
+        })
+}
+
+/// Level `base` would persist for `target`, so a ceiling can be applied without
+/// raising a stricter configured level.
+///
+/// `LevelFilter` orders as `OFF < ERROR < WARN < INFO < DEBUG < TRACE`, so
+/// `min` picks the more restrictive of the two.
+fn requested_level(base: &Targets, target: &str) -> LevelFilter {
+    [
+        Level::TRACE,
+        Level::DEBUG,
+        Level::INFO,
+        Level::WARN,
+        Level::ERROR,
+    ]
+    .into_iter()
+    .find(|level| base.would_enable(target, level))
+    .map_or(LevelFilter::OFF, LevelFilter::from_level)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
