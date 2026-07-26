@@ -73,9 +73,9 @@ Leaving it unset keeps the default, which records everything except a short list
 
 - It takes `level` and `target=level` directives separated by commas — a subset of what `RUST_LOG` accepts. Per-span field filters such as `[span{field=value}]` are not supported and cause the whole value to be ignored.
 - A bare level is required. `CODEX_SQLITE_LOG=codex_core=debug` names a target but no default, which disables every target you did not name.
-- The high-volume targets are clamped, so `CODEX_SQLITE_LOG=trace` does not restore them. Two of them span a subtree and can be restored by naming a longer target — `hyper_util::client=debug` and `rmcp::service::foo=debug` override their clamps. The rest emit under the clamped name itself, so they cannot be raised at all.
+- The high-volume targets are clamped, so `CODEX_SQLITE_LOG=trace` does not restore them. Two of them span a subtree and can be lifted by naming a longer target, for example `CODEX_SQLITE_LOG=trace,hyper_util::client=debug`. The rest emit under the clamped name itself, so they cannot be raised at all.
 
-Turning this down trades detail for history. The default records every TRACE event, and because each partition keeps only its most recent rows, a busy session evicts its own warnings and errors within seconds; a measured six-turn session retained no `ERROR` rows at all, while the same session under `CODEX_SQLITE_LOG=warn` retained all of them. Expect less per-event detail in `/feedback` and crash reports, and a much longer window of the levels that usually matter. Unset it when you need full TRACE detail for a specific reproduction.
+Turning this down trades detail for history. The default records every TRACE event, and each partition keeps only its most recent rows, so a busy session can evict its own warnings and errors within seconds. Expect less per-event detail in `/feedback` and crash reports, and a longer window of the levels that usually matter. Unset it when you need full TRACE detail for a specific reproduction.
 
 On macOS, applications launched from Finder do not inherit shell environment variables. Use `launchctl setenv CODEX_SQLITE_LOG warn` if you start Codex from outside a terminal.
 

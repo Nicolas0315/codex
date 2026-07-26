@@ -14,10 +14,13 @@
 //! # async fn example(state_db: std::sync::Arc<codex_state::StateRuntime>) {
 //! let layer = log_db::start(state_db);
 //! let _ = tracing_subscriber::registry()
-//!     .with(layer)
+//!     .with(layer.with_filter(log_db::default_filter()))
 //!     .try_init();
 //! # }
 //! ```
+//!
+//! Attach [`default_filter`] as shown. It carries the per-target ceilings, so a
+//! bare `.with(layer)` persists high-frequency targets this crate expects to drop.
 
 use std::future::Future;
 use std::sync::OnceLock;
@@ -70,8 +73,9 @@ const DEFAULT_PERSISTED_LEVEL: LevelFilter = LevelFilter::TRACE;
 ///
 /// These targets are churn rather than diagnostics: the `codex_otel` targets are
 /// exported through OTel instead, `opentelemetry_sdk` emits a DEBUG timer
-/// meta-event every second per process, and the rest are high-frequency dumps
-/// that evict the entries `/feedback` actually reads.
+/// meta-event every second per process — over 30% of retained logs in measured
+/// high-fanout Codex environments — and the rest are high-frequency dumps that
+/// evict the entries `/feedback` actually reads.
 ///
 /// A ceiling clamps the target named here and, because `Targets` matches on byte
 /// prefixes, every target it prefixes. It is never a floor, so a stricter

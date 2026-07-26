@@ -123,6 +123,17 @@ fn persisted_filter_normalizes_directive_elements() {
     }
 }
 
+/// The escape hatch documented in `docs/install.md`: a target longer than a
+/// ceiling overrides it, while the ceiling still governs the shorter name.
+#[test]
+fn a_longer_target_lifts_its_ceiling() {
+    let filter = filter_from_directives(Some("trace,hyper_util::client=debug"));
+
+    assert!(filter.would_enable("hyper_util::client::legacy::pool", &tracing::Level::DEBUG));
+    assert!(!filter.would_enable("hyper_util::client::legacy::pool", &tracing::Level::TRACE));
+    assert!(!filter.would_enable("hyper_util", &tracing::Level::INFO));
+}
+
 /// At `off` every ceiling has to resolve to OFF. Reverting the fold to
 /// unconditional overrides leaves `hyper_util` at WARN and `opentelemetry_sdk` at
 /// INFO, so this is what pins the clamp direction for the non-OFF entries.
