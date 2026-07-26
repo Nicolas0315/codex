@@ -68,6 +68,74 @@ fn level_filter_min_is_the_more_restrictive_level() {
     assert!(LevelFilter::INFO < LevelFilter::TRACE);
 }
 
+/// Pins the variable name, which is the part of `default_filter` a rename or typo
+/// would silently break — every other test here calls `filter_from_directives`
+/// with a literal.
+///
+/// The `env::var` read itself stays uncovered on purpose: exercising it means
+/// `set_var` in a parallel test binary whose siblings call `env::temp_dir`, and
+/// that is undefined behaviour rather than coverage.
+#[test]
+fn sqlite_log_env_variable_name_is_stable() {
+    assert_eq!(SQLITE_LOG_ENV, "CODEX_SQLITE_LOG");
+}
+
+/// `Targets::from_str` accepts every one of these, so the unparseable-value
+/// fallback never sees them — a stray comma or space would otherwise invert what
+/// the user asked for.
+#[test]
+fn persisted_filter_normalizes_directive_elements() {
+    for directives in ["trace", "trace,", " trace ", "trace, ,"] {
+        let filter = filter_from_directives(Some(directives));
+
+        assert!(
+            filter.would_enable("codex_state", &tracing::Level::TRACE),
+            "expected trace for {directives:?}"
+        );
+    }
+
+    for directives in ["off", "off,", " off "] {
+        let filter = filter_from_directives(Some(directives));
+
+        assert!(
+            !filter.would_enable("codex_state", &tracing::Level::ERROR),
+            "expected silence for {directives:?}"
+        );
+    }
+
+    // Whitespace around `=` fails the other way: `Targets` rejects the value, so
+    // without normalization this silently falls back to the default.
+    for directives in ["warn , codex_core=debug", "warn, codex_core = debug"] {
+        let filter = filter_from_directives(Some(directives));
+
+        assert!(
+            filter.would_enable("codex_state", &tracing::Level::WARN),
+            "expected warn default for {directives:?}"
+        );
+        assert!(
+            !filter.would_enable("codex_state", &tracing::Level::INFO),
+            "expected the default to be honored for {directives:?}"
+        );
+        assert!(
+            filter.would_enable("codex_core", &tracing::Level::DEBUG),
+            "expected the per-target override for {directives:?}"
+        );
+    }
+}
+
+/// At `off` every ceiling has to resolve to OFF. Reverting the fold to
+/// unconditional overrides leaves `hyper_util` at WARN and `opentelemetry_sdk` at
+/// INFO, so this is what pins the clamp direction for the non-OFF entries.
+#[test]
+fn ceilings_clamp_to_off_when_everything_is_disabled() {
+    let filter = filter_from_directives(Some("off"));
+
+    assert!(!filter.would_enable("hyper_util", &tracing::Level::ERROR));
+    assert!(!filter.would_enable("opentelemetry_sdk", &tracing::Level::ERROR));
+    assert!(!filter.would_enable("rmcp::service", &tracing::Level::ERROR));
+    assert!(!filter.would_enable("codex_state", &tracing::Level::ERROR));
+}
+
 #[test]
 fn persisted_filter_defaults_to_trace_without_configuration() {
     let filter = filter_from_directives(None);
@@ -121,7 +189,7 @@ fn noisy_ceilings_still_apply_to_a_verbose_configuration() {
 
 #[test]
 fn persisted_filter_falls_back_when_configuration_is_unusable() {
-    for directives in ["", "   ", "codex_state=notalevel"] {
+    for directives in ["", "   ", ",,,", "codex_state=notalevel"] {
         let filter = filter_from_directives(Some(directives));
 
         assert!(
@@ -161,7 +229,11 @@ async fn sqlite_sink_respects_configured_level_filter() {
     let layer = start(runtime.clone());
 
     let guard = tracing_subscriber::registry()
-        .with(layer.clone().with_filter(filter_from_directives(Some("warn"))))
+        .with(
+            layer
+                .clone()
+                .with_filter(filter_from_directives(Some("warn"))),
+        )
         .set_default();
 
     tracing::trace!(target: "codex_state", "dropped-trace");

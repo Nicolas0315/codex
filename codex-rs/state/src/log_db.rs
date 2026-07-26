@@ -68,14 +68,25 @@ const DEFAULT_PERSISTED_LEVEL: LevelFilter = LevelFilter::TRACE;
 
 /// Per-target ceilings for the persisted sink.
 ///
-/// These targets are churn rather than diagnostics: bridged `log` records
-/// duplicate events already stored under their real target, the `codex_otel`
-/// targets are exported through OTel instead, and the rest are high-frequency
-/// dumps that evict the entries `/feedback` actually reads. They are ceilings
-/// and never floors, so a stricter [`SQLITE_LOG_ENV`] still wins.
+/// These targets are churn rather than diagnostics: the `codex_otel` targets are
+/// exported through OTel instead, `opentelemetry_sdk` emits a DEBUG timer
+/// meta-event every second per process, and the rest are high-frequency dumps
+/// that evict the entries `/feedback` actually reads.
+///
+/// A ceiling clamps the target named here and, because `Targets` matches on byte
+/// prefixes, every target it prefixes. It is never a floor, so a stricter
+/// [`SQLITE_LOG_ENV`] wins. A *longer* prefix in [`SQLITE_LOG_ENV`] does override
+/// it — `hyper_util::client=debug` restores DEBUG beneath `hyper_util` — which is
+/// deliberate: an explicitly named subtree is a request, not an accident.
+///
+/// `log` is redundant with the `on_event` guard for every target that currently
+/// emits — no crate in the tree logs under a `log`-prefixed target other than the
+/// bridge — and is listed only to keep the filter identical to what shipped
+/// before this variable existed.
 const NOISY_TARGET_CEILINGS: &[(&str, LevelFilter)] = &[
     ("hyper_util", LevelFilter::WARN),
     ("log", LevelFilter::OFF),
+    ("opentelemetry_sdk", LevelFilter::INFO),
     ("codex_otel.log_only", LevelFilter::OFF),
     ("codex_otel.trace_safe", LevelFilter::OFF),
     ("rmcp::service", LevelFilter::INFO),
@@ -89,9 +100,7 @@ pub fn default_filter() -> Targets {
 
 fn filter_from_directives(configured: Option<&str>) -> Targets {
     let base = configured
-        .map(str::trim)
-        .filter(|directives| !directives.is_empty())
-        .and_then(|directives| directives.parse::<Targets>().ok())
+        .and_then(parse_directives)
         .unwrap_or_else(|| Targets::new().with_default(DEFAULT_PERSISTED_LEVEL));
 
     NOISY_TARGET_CEILINGS
@@ -99,6 +108,33 @@ fn filter_from_directives(configured: Option<&str>) -> Targets {
         .fold(base.clone(), |targets, (target, ceiling)| {
             targets.with_target(*target, requested_level(&base, target).min(*ceiling))
         })
+}
+
+/// Parse configured directives, normalizing whitespace and empty elements first.
+///
+/// `Targets::from_str` splits on commas without trimming and maps an empty element
+/// to `ERROR` with no target, so `"trace,"` parses cleanly into a filter that
+/// discards almost everything the caller asked to keep. Because it parses, an
+/// unparseable-value fallback never sees it. Whitespace around `=` fails the other
+/// way, falling back to the default and silently ignoring the request. Normalizing
+/// both is what makes the fallback mean what it says.
+fn parse_directives(configured: &str) -> Option<Targets> {
+    let normalized = configured
+        .split(',')
+        .map(|directive| {
+            directive
+                .split('=')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("=")
+        })
+        .filter(|directive| !directive.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    if normalized.is_empty() {
+        return None;
+    }
+    normalized.parse::<Targets>().ok()
 }
 
 /// Level `base` would persist for `target`, so a ceiling can be applied without
@@ -264,17 +300,6 @@ where
         // dispatching an event whose tracing target is `log`, so the outer
         // target filter cannot reliably reject these bridged events.
         if metadata.target() == "log" {
-            return;
-        }
-
-        // The SDK emits DEBUG timer meta-events every second per process; these
-        // were over 30% of retained logs in measured high-fanout Codex environments.
-        if metadata.target() == "opentelemetry_sdk"
-            && matches!(
-                *metadata.level(),
-                tracing::Level::TRACE | tracing::Level::DEBUG
-            )
-        {
             return;
         }
 
