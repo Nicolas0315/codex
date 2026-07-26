@@ -83,10 +83,10 @@ const DEFAULT_PERSISTED_LEVEL: LevelFilter = LevelFilter::TRACE;
 /// it — `hyper_util::client=debug` restores DEBUG beneath `hyper_util` — which is
 /// deliberate: an explicitly named subtree is a request, not an accident.
 ///
-/// `log` is redundant with the `on_event` guard for every target that currently
-/// emits — no crate in the tree logs under a `log`-prefixed target other than the
-/// bridge — and is listed only to keep the filter identical to what shipped
-/// before this variable existed.
+/// `log` and `opentelemetry_sdk` are also dropped in `on_event`, which runs
+/// whether or not a filter is attached. They stay listed so the table describes
+/// the whole noise model, and so `on_event` stays the backstop for embedders that
+/// attach this layer bare.
 const NOISY_TARGET_CEILINGS: &[(&str, LevelFilter)] = &[
     ("hyper_util", LevelFilter::WARN),
     ("log", LevelFilter::OFF),
@@ -304,6 +304,18 @@ where
         // dispatching an event whose tracing target is `log`, so the outer
         // target filter cannot reliably reject these bridged events.
         if metadata.target() == "log" {
+            return;
+        }
+
+        // Also a ceiling in `NOISY_TARGET_CEILINGS`. Kept here as well so an
+        // embedder attaching this layer without `default_filter` still drops it;
+        // the SDK emits one of these per second per process.
+        if metadata.target() == "opentelemetry_sdk"
+            && matches!(
+                *metadata.level(),
+                tracing::Level::TRACE | tracing::Level::DEBUG
+            )
+        {
             return;
         }
 
