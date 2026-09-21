@@ -348,7 +348,7 @@ opentelemetry = "0.31.0"
 opentelemetry-appender-tracing = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry-semantic-conventions = "0.31.0"
-opentelemetry_sdk = "0.32.1"
+opentelemetry_sdk = "0.33.0"
 os_info = "3.12.0"
 owo-colors = "4.3.0"
 path-absolutize = "3.1.1"
@@ -368,7 +368,7 @@ rcgen = { version = "0.14.7", default-features = false, features = [
 regex = "1.12.3"
 regex-lite = "0.1.8"
 reqwest = { version = "0.12", features = ["cookies"] }
-rmcp = { version = "1.7.0", default-features = false }
+rmcp = { version = "2.1.0", default-features = false }
 runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
 rustls = { version = "0.23", default-features = false, features = [
     "aws_lc_rs",
