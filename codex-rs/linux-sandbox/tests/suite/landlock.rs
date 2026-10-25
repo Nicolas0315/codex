@@ -47,7 +47,7 @@ fn create_env_from_core_vars() -> HashMap<String, String> {
     create_env(&policy, /*thread_id*/ None)
 }
 
-fn codex_linux_sandbox_exe() -> PathBuf {
+pub(super) fn codex_linux_sandbox_exe() -> PathBuf {
     let sandbox_program = PathBuf::from(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
     match sandbox_program.canonicalize() {
         Ok(path) => path,

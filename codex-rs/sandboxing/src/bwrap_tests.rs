@@ -127,7 +127,11 @@ fn finds_first_executable_bwrap_in_joined_search_path() {
     let search_path = std::env::join_paths([first_dir, second_dir]).expect("join search path");
 
     assert_eq!(
-        find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), &cwd),
+        find_system_bwrap_in_search_paths(
+            std::env::split_paths(&search_path),
+            &FileSystemSandboxPolicy::read_only(),
+            &cwd
+        ),
         Some(expected_bwrap)
     );
 }
@@ -144,22 +148,114 @@ fn skips_workspace_local_bwrap_in_joined_search_path() {
     let search_path = std::env::join_paths([cwd.clone(), trusted_dir]).expect("join search path");
 
     assert_eq!(
-        find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), &cwd),
+        find_system_bwrap_in_search_paths(
+            std::env::split_paths(&search_path),
+            &FileSystemSandboxPolicy::read_only(),
+            &cwd
+        ),
         Some(expected_bwrap)
     );
 }
 
 #[test]
-fn root_cwd_does_not_hide_system_bwrap_candidates() {
+fn trusted_root_workspace_fails_closed_for_path_helpers() {
     let temp_dir = tempdir().expect("temp dir");
     let bin_dir = temp_dir.path().join("bin");
     std::fs::create_dir_all(&bin_dir).expect("create bin dir");
-    let expected_bwrap = write_named_fake_bwrap_in(&bin_dir);
+    let _bwrap = write_named_fake_bwrap_in(&bin_dir);
     let search_path = std::env::join_paths([bin_dir]).expect("join search path");
 
     assert_eq!(
-        find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), Path::new("/")),
-        Some(expected_bwrap)
+        find_system_bwrap_in_search_paths(
+            std::env::split_paths(&search_path),
+            &FileSystemSandboxPolicy::read_only(),
+            Path::new("/")
+        ),
+        None
+    );
+}
+
+#[test]
+fn skips_additional_writable_roots_and_their_aliases() {
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    let writable = temp.path().join("writable");
+    let alias = temp.path().join("alias");
+    let trusted = temp.path().join("trusted");
+    for directory in [&workspace, &writable, &trusted] {
+        std::fs::create_dir(directory).expect("create directory");
+    }
+    symlink(&writable, &alias).expect("create alias");
+    write_named_fake_bwrap_in(&writable);
+    let expected = write_named_fake_bwrap_in(&trusted);
+    let policy = FileSystemSandboxPolicy::read_only().with_additional_writable_roots(
+        &workspace,
+        &[AbsolutePathBuf::from_absolute_path(&alias).expect("absolute alias")],
+    );
+
+    for candidate in [&writable, &alias] {
+        assert_eq!(
+            find_system_bwrap_in_search_paths(
+                [candidate.clone(), trusted.clone()],
+                &policy,
+                &workspace,
+            ),
+            Some(expected.clone()),
+        );
+    }
+}
+
+#[test]
+fn skips_read_only_helpers_with_replaceable_parents() {
+    use codex_protocol::protocol::FileSystemAccessMode;
+    use codex_protocol::protocol::FileSystemPath;
+    use codex_protocol::protocol::FileSystemSandboxEntry;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+
+    let temp = tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    let writable = temp.path().join("writable");
+    let trusted = temp.path().join("trusted");
+    for directory in [&workspace, &writable, &trusted] {
+        std::fs::create_dir(directory).expect("create directory");
+    }
+    let candidate = write_named_fake_bwrap_in(&writable);
+    let expected = write_named_fake_bwrap_in(&trusted);
+    let mut policy = FileSystemSandboxPolicy::read_only().with_additional_writable_roots(
+        &workspace,
+        &[AbsolutePathBuf::from_absolute_path(&writable).expect("absolute root")],
+    );
+    policy.entries.push(FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(&candidate).expect("absolute helper"),
+        },
+        access: FileSystemAccessMode::Read,
+    });
+    assert!(!policy.can_write_path_with_cwd(&candidate, &workspace));
+    assert_eq!(
+        find_system_bwrap_in_search_paths([writable, trusted], &policy, &workspace),
+        Some(expected),
+    );
+}
+
+#[test]
+fn unrestricted_filesystem_does_not_trust_user_writable_installations() {
+    let temp = tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    std::fs::create_dir(&bin_dir).expect("create bin");
+    write_named_fake_bwrap_in(&bin_dir);
+    assert_eq!(
+        find_system_bwrap_in_search_paths(
+            [bin_dir],
+            &FileSystemSandboxPolicy::unrestricted(),
+            &workspace,
+        ),
+        None,
     );
 }
 
