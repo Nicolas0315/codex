@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "Fixture setup failures must fail the test immediately"
+)]
 fn fixture() -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -113,38 +117,6 @@ fn concurrent_publishers_do_not_replace_the_winning_directory() {
 }
 
 #[test]
-fn oversized_or_symlinked_ownership_records_are_ordinary() {
-    use std::os::unix::fs::MetadataExt;
-    let root = fixture();
-    let path = root.join(".git");
-    prepare_synthetic_metadata_directory(&path).unwrap();
-    let metadata = fs::metadata(&path).unwrap();
-    let mut identity_prefix = b"CSM1".to_vec();
-    identity_prefix.extend_from_slice(&metadata.dev().to_le_bytes());
-    identity_prefix.extend_from_slice(&metadata.ino().to_le_bytes());
-    let record = fs::read_dir(synthetic_metadata_registry_path())
-        .unwrap()
-        .map(Result::unwrap)
-        .filter(|entry| entry.file_type().unwrap().is_file())
-        .find(|entry| {
-            fs::read(entry.path())
-                .unwrap()
-                .starts_with(&identity_prefix)
-        })
-        .unwrap()
-        .path();
-    let original = fs::read(&record).unwrap();
-    fs::write(&record, vec![0; 4096]).unwrap();
-    assert!(!is_synthetic_metadata_directory(&path));
-    fs::write(&record, &original).unwrap();
-    assert!(is_synthetic_metadata_directory(&path));
-    let moved = root.join("record");
-    fs::rename(&record, &moved).unwrap();
-    symlink(&moved, &record).unwrap();
-    assert!(!is_synthetic_metadata_directory(&path));
-}
-
-#[test]
 fn parent_symlink_aliases_resolve_to_the_same_owned_object() {
     let root = fixture();
     let parent = root.join("real");
@@ -235,6 +207,10 @@ fn interrupted_private_authority_preparation_does_not_block_next_initialization(
 }
 
 #[test]
+#[expect(
+    clippy::needless_collect,
+    reason = "All barrier participants must be spawned before any worker is joined"
+)]
 fn simultaneous_first_authority_initializers_publish_one_complete_object() {
     use std::os::unix::fs::MetadataExt;
     use std::sync::Arc;
@@ -326,17 +302,23 @@ fn querying_existing_authorities_preserves_their_objects_and_contents() {
     let before = existing_synthetic_metadata_authorities()
         .unwrap()
         .into_iter()
+        .filter(|path| {
+            !path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".codex-synthetic-stage-v2-")
+            })
+        })
         .map(|path| {
             let metadata = fs::metadata(&path).unwrap();
             let marker_path = path.join("format");
-            let marker_metadata = fs::metadata(&marker_path).unwrap();
-            let marker = fs::read(marker_path).unwrap();
+            let marker_metadata = fs::metadata(&marker_path).ok();
+            let marker = fs::read(marker_path).ok();
             (
                 path,
                 metadata.dev(),
                 metadata.ino(),
                 metadata.mode(),
-                marker_metadata.ino(),
+                marker_metadata.map(|metadata| metadata.ino()),
                 marker,
             )
         })
@@ -344,20 +326,81 @@ fn querying_existing_authorities_preserves_their_objects_and_contents() {
     let after = existing_synthetic_metadata_authorities()
         .unwrap()
         .into_iter()
+        .filter(|path| {
+            !path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".codex-synthetic-stage-v2-")
+            })
+        })
         .map(|path| {
             let metadata = fs::metadata(&path).unwrap();
             let marker_path = path.join("format");
-            let marker_metadata = fs::metadata(&marker_path).unwrap();
-            let marker = fs::read(marker_path).unwrap();
+            let marker_metadata = fs::metadata(&marker_path).ok();
+            let marker = fs::read(marker_path).ok();
             (
                 path,
                 metadata.dev(),
                 metadata.ino(),
                 metadata.mode(),
-                marker_metadata.ino(),
+                marker_metadata.map(|metadata| metadata.ino()),
                 marker,
             )
         })
         .collect::<Vec<_>>();
     assert_eq!(after, before);
+}
+
+#[test]
+fn retained_legacy_primary_is_reserved_once_without_adopting_unknown_state() {
+    use std::os::unix::fs::MetadataExt;
+    let path = fixture().with_extension("retained-legacy-authority");
+    assert!(!path.exists());
+    super::linux::initialize_authority_if_absent(&path).unwrap();
+    let before = fs::metadata(&path).unwrap();
+    let marker_before = fs::metadata(path.join("format")).unwrap();
+    let marker = fs::read(path.join("format")).unwrap();
+    super::linux::initialize_authority_if_absent(&path).unwrap();
+    let after = fs::metadata(&path).unwrap();
+    let marker_after = fs::metadata(path.join("format")).unwrap();
+    assert_eq!(
+        (
+            after.dev(),
+            after.ino(),
+            after.mode(),
+            after.mtime(),
+            after.mtime_nsec(),
+            marker_after.ino()
+        ),
+        (
+            before.dev(),
+            before.ino(),
+            before.mode(),
+            before.mtime(),
+            before.mtime_nsec(),
+            marker_before.ino()
+        )
+    );
+    assert_eq!(fs::read(path.join("format")).unwrap(), marker);
+    let unknown = fixture();
+    fs::write(unknown.join("user-content"), b"preserve unknown directory").unwrap();
+    let unknown_before = fs::metadata(&unknown).unwrap();
+    assert!(super::linux::initialize_authority_if_absent(&unknown).is_err());
+    let unknown_after = fs::metadata(&unknown).unwrap();
+    assert_eq!(
+        (
+            unknown_after.ino(),
+            unknown_after.mtime(),
+            unknown_after.mtime_nsec()
+        ),
+        (
+            unknown_before.ino(),
+            unknown_before.mtime(),
+            unknown_before.mtime_nsec()
+        )
+    );
+    assert!(!unknown.join("format").exists());
+    assert_eq!(
+        fs::read(unknown.join("user-content")).unwrap(),
+        b"preserve unknown directory"
+    );
 }

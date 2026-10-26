@@ -21,6 +21,8 @@ use std::task::Poll;
 
 mod synthetic_metadata;
 #[cfg(target_os = "linux")]
+pub use synthetic_metadata::SyntheticMetadataProtection;
+#[cfg(target_os = "linux")]
 pub use synthetic_metadata::existing_synthetic_metadata_authorities;
 #[cfg(target_os = "linux")]
 pub use synthetic_metadata::initialize_synthetic_metadata_registry;
@@ -28,7 +30,13 @@ pub use synthetic_metadata::is_synthetic_metadata_directory;
 #[cfg(target_os = "linux")]
 pub use synthetic_metadata::prepare_synthetic_metadata_directory;
 #[cfg(target_os = "linux")]
+pub use synthetic_metadata::prepare_synthetic_metadata_staging;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::prepare_synthetic_metadata_staging_for_policy;
+#[cfg(target_os = "linux")]
 pub use synthetic_metadata::synthetic_metadata_authority_paths;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::synthetic_metadata_protection;
 #[cfg(target_os = "linux")]
 pub use synthetic_metadata::synthetic_metadata_registry_path;
 

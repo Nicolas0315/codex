@@ -16,7 +16,9 @@ use std::path::Path;
 pub fn is_synthetic_metadata_directory(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        is_protected_metadata_path(path) && linux::is_owned(path).unwrap_or(false)
+        is_protected_metadata_path(path)
+            && (publication::is_owned(path).unwrap_or(false)
+                || linux::is_owned(path).unwrap_or(false))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -34,15 +36,27 @@ fn is_protected_metadata_path(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::existing_synthetic_metadata_authorities;
+pub use publication::SyntheticMetadataProtection;
 #[cfg(target_os = "linux")]
-pub use linux::initialize_synthetic_metadata_registry;
+pub use publication::existing_synthetic_metadata_authorities;
 #[cfg(target_os = "linux")]
-pub use linux::prepare_synthetic_metadata_directory;
+pub use publication::initialize_synthetic_metadata_registry;
 #[cfg(target_os = "linux")]
-pub use linux::synthetic_metadata_authority_paths;
+pub use publication::prepare_synthetic_metadata_directory;
 #[cfg(target_os = "linux")]
-pub use linux::synthetic_metadata_registry_path;
+pub use publication::prepare_synthetic_metadata_staging;
+#[cfg(target_os = "linux")]
+pub use publication::prepare_synthetic_metadata_staging_for_policy;
+#[cfg(target_os = "linux")]
+pub use publication::synthetic_metadata_authority_paths;
+#[cfg(target_os = "linux")]
+pub use publication::synthetic_metadata_protection;
+#[cfg(target_os = "linux")]
+pub use publication::synthetic_metadata_registry_path;
+
+#[cfg(target_os = "linux")]
+#[path = "synthetic_metadata_publication.rs"]
+mod publication;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -51,7 +65,6 @@ mod linux {
     use std::ffi::CStr;
     use std::ffi::CString;
     use std::fs::File;
-    use std::fs::OpenOptions;
     use std::io;
     use std::io::Read;
     use std::io::Write;
@@ -59,7 +72,6 @@ mod linux {
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
-    use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU64;
@@ -83,22 +95,6 @@ mod linux {
         synthetic_metadata_authority_paths().remove(0)
     }
 
-    /// Initializes the durable registry and available fixed staging authorities.
-    ///
-    /// Authorities must remain protected from restricted commands even when the
-    /// workspace itself is writable. Existing unmarked authorities are rejected.
-    pub fn initialize_synthetic_metadata_registry() -> io::Result<PathBuf> {
-        let paths = synthetic_metadata_authority_paths();
-        for path in &paths {
-            match open_authority(path, AuthorityMode::Initialize) {
-                Ok(_) => {}
-                Err(err) if optional_authority_unavailable(path, &err) => {}
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(paths[0].clone())
-    }
-
     /// Validates already-present fixed authorities without creating or syncing
     /// anything. Only absent authority paths are skipped; malformed or
     /// inaccessible evidence is an error rather than trusted mount input.
@@ -117,25 +113,36 @@ mod linux {
         Ok(existing)
     }
 
-    fn optional_authority_unavailable(path: &Path, error: &io::Error) -> bool {
-        !path.starts_with("/var/tmp")
-            && matches!(
-                error.raw_os_error(),
-                Some(libc::ENOENT | libc::EACCES | libc::EPERM | libc::EROFS)
-            )
-            && std::fs::symlink_metadata(path)
-                .is_err_and(|err| err.kind() == io::ErrorKind::NotFound)
+    /// Reserve an authority before a restricted writer can precreate its path.
+    /// Existing valid state is only read; unknown objects are never initialized.
+    pub(super) fn initialize_authority_if_absent(path: &Path) -> io::Result<File> {
+        match open_authority(path, AuthorityMode::ReadOnly) {
+            Ok(authority) => Ok(authority),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(path)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+            {
+                open_authority(path, AuthorityMode::Initialize)
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    fn invalid(message: &str) -> io::Error {
+    pub(super) fn invalid(message: &str) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, message)
     }
 
-    fn c_path(path: &Path) -> io::Result<CString> {
+    pub(super) fn c_path(path: &Path) -> io::Result<CString> {
         CString::new(path.as_os_str().as_bytes()).map_err(|_| invalid("path contains NUL"))
     }
 
-    fn open_at(parent: &File, name: &CStr, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+    pub(super) fn open_at(
+        parent: &File,
+        name: &CStr,
+        flags: i32,
+        mode: libc::mode_t,
+    ) -> io::Result<File> {
         let fd = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
@@ -151,7 +158,7 @@ mod linux {
         }
     }
 
-    fn open_directory(path: &Path) -> io::Result<File> {
+    pub(super) fn open_directory(path: &Path) -> io::Result<File> {
         let path = c_path(path)?;
         let fd = unsafe {
             libc::open(
@@ -166,7 +173,7 @@ mod linux {
         }
     }
 
-    fn read_bounded(file: File) -> io::Result<Vec<u8>> {
+    pub(super) fn read_bounded(file: File) -> io::Result<Vec<u8>> {
         let metadata = file.metadata()?;
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
@@ -183,6 +190,7 @@ mod linux {
         Ok(bytes)
     }
 
+    #[derive(Clone, Copy)]
     pub(super) enum AuthorityMode {
         Initialize,
         ReadOnly,
@@ -308,12 +316,12 @@ mod linux {
             .map_err(|_| invalid("invalid staging name"))
     }
 
-    enum Publication {
+    pub(super) enum Publication {
         Published,
         AlreadyExists,
     }
 
-    fn publish(
+    pub(super) fn publish(
         source: &File,
         name: &CStr,
         destination: &File,
@@ -342,7 +350,7 @@ mod linux {
 
     // The directory FD is used both for identity and enumeration, so replacing
     // the leaf or an ancestor cannot attach an ownership record to another object.
-    fn identity(directory: &File) -> io::Result<Vec<u8>> {
+    pub(super) fn identity(directory: &File) -> io::Result<Vec<u8>> {
         let metadata = directory.metadata()?;
         let mut bytes = Vec::from(b"CSM1".as_slice());
         bytes.extend_from_slice(&metadata.dev().to_le_bytes());
@@ -397,7 +405,7 @@ mod linux {
         Ok(bytes)
     }
 
-    fn record(directory: &File) -> io::Result<(CString, Vec<u8>)> {
+    pub(super) fn record(directory: &File) -> io::Result<(CString, Vec<u8>)> {
         let identity = identity(directory)?;
         let key = format!("{:x}", Sha256::digest(&identity));
         let metadata = directory.metadata()?;
@@ -410,7 +418,7 @@ mod linux {
         ))
     }
 
-    fn is_empty(directory: &File) -> io::Result<bool> {
+    pub(super) fn is_empty(directory: &File) -> io::Result<bool> {
         let mut buffer = [0_u8; 4096];
         loop {
             let count = unsafe {
@@ -465,141 +473,6 @@ mod linux {
         }
         // Enumeration may overlap a writer; require the initial mtime again.
         Ok(record(&directory)?.1 == expected)
-    }
-
-    /// Creates an owned empty directory if the destination does not exist.
-    ///
-    /// Only protected metadata names may be newly published. Existing objects
-    /// (including symlinks and other names) are preserved. Filesystems without
-    /// birth times or generation-bearing file handles, or without a protected
-    /// same-filesystem staging authority, fail before publication. Nothing here
-    /// removes published paths, including after errors or process termination.
-    pub fn prepare_synthetic_metadata_directory(path: &Path) -> io::Result<()> {
-        // The destination leaf must not be followed; its parent aliases have
-        // normal path semantics and are pinned by this directory descriptor.
-        let parent = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
-            .open(
-                path.parent()
-                    .ok_or_else(|| invalid("destination has no parent"))?,
-            )?;
-        let name = c_path(Path::new(
-            path.file_name()
-                .ok_or_else(|| invalid("destination has no name"))?,
-        ))?;
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe {
-            libc::fstatat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                &mut stat,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } == 0
-        {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::NotFound {
-            return Err(error);
-        }
-        if !super::is_protected_metadata_path(path) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "only protected metadata names may be published",
-            ));
-        }
-        initialize_synthetic_metadata_registry()?;
-        let registry =
-            open_authority(&synthetic_metadata_registry_path(), AuthorityMode::ReadOnly)?;
-        let device = parent.metadata()?.dev();
-        let mut stage_root = None;
-        for authority in synthetic_metadata_authority_paths() {
-            match open_authority(&authority, AuthorityMode::ReadOnly) {
-                Ok(candidate) if candidate.metadata()?.dev() == device => {
-                    stage_root = Some(candidate);
-                    break;
-                }
-                Ok(_) => {}
-                Err(err) if optional_authority_unavailable(&authority, &err) => {}
-                Err(err) => return Err(err),
-            }
-        }
-        let stage_root = stage_root.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "no protected synthetic metadata staging authority on destination filesystem",
-            )
-        })?;
-        let stage_name = loop {
-            let name = unique_name("stage")?;
-            if unsafe {
-                libc::mkdirat(stage_root.as_raw_fd(), name.as_ptr(), /*mode*/ 0o755)
-            } == 0
-            {
-                break name;
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::AlreadyExists {
-                return Err(error);
-            }
-        };
-        let staged = open_at(
-            &stage_root,
-            &stage_name,
-            libc::O_RDONLY | libc::O_DIRECTORY,
-            /*mode*/ 0,
-        )?;
-        let (key, bytes) = record(&staged)?;
-        match open_at(
-            &registry,
-            &key,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            /*mode*/ 0o600,
-        ) {
-            Ok(mut file) => {
-                file.write_all(&bytes)?;
-                file.sync_all()?;
-            }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                if read_bounded(open_at(&registry, &key, libc::O_RDONLY, /*mode*/ 0)?)? != bytes {
-                    return Err(invalid("synthetic metadata identity collision"));
-                }
-            }
-            Err(err) => return Err(err),
-        }
-        registry.sync_all()?;
-        if read_bounded(open_at(&registry, &key, libc::O_RDONLY, /*mode*/ 0)?)? != bytes {
-            return Err(invalid(
-                "synthetic metadata registration changed before publication",
-            ));
-        }
-        staged.sync_all()?;
-        stage_root.sync_all()?;
-        if matches!(
-            publish(&stage_root, &stage_name, &parent, &name)?,
-            Publication::AlreadyExists
-        ) {
-            return Ok(());
-        }
-        parent.sync_all()?;
-        stage_root.sync_all()?;
-        let published = open_at(
-            &parent,
-            &name,
-            libc::O_RDONLY | libc::O_DIRECTORY,
-            /*mode*/ 0,
-        )?;
-        if record(&published)?.1 != bytes
-            || !is_empty(&published)?
-            || record(&published)?.1 != bytes
-        {
-            return Err(invalid(
-                "synthetic metadata publication changed identity or contents",
-            ));
-        }
-        Ok(())
     }
 }
 

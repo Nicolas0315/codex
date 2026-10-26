@@ -360,8 +360,12 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
-    crate::owned_metadata::protect_arguments(file_system_sandbox_policy, &mut bwrap_args.args)
-        .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    crate::owned_metadata::protect_arguments(
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+        &mut bwrap_args.args,
+    )
+    .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     apply_inner_command_argv0(&launcher, &mut bwrap_args.args);
     run_or_exec_bwrap(&launcher, bwrap_args);
 }
@@ -462,8 +466,12 @@ fn preflight_proc_mount_support(
         file_system_sandbox_policy,
         network_mode,
     )?;
-    let stderr =
-        run_bwrap_in_child_capture_stderr(launcher, preflight_argv, file_system_sandbox_policy);
+    let stderr = run_bwrap_in_child_capture_stderr(
+        launcher,
+        preflight_argv,
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+    );
     Ok(!is_proc_mount_failure(stderr.as_str()))
 }
 
@@ -1313,9 +1321,14 @@ fn run_bwrap_in_child_capture_stderr(
     launcher: &BubblewrapLauncher,
     mut bwrap_args: crate::bwrap::BwrapArgs,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    sandbox_policy_cwd: &Path,
 ) -> String {
-    crate::owned_metadata::protect_arguments(file_system_sandbox_policy, &mut bwrap_args.args)
-        .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    crate::owned_metadata::protect_arguments(
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+        &mut bwrap_args.args,
+    )
+    .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     const MAX_PREFLIGHT_STDERR_BYTES: u64 = 64 * 1024;
     let crate::bwrap::BwrapArgs {
         args,

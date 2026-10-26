@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use codex_file_system::existing_synthetic_metadata_authorities;
 use codex_file_system::is_synthetic_metadata_directory;
 use codex_file_system::synthetic_metadata_authority_paths;
 use codex_git_utils::get_git_repo_root;
@@ -329,4 +330,96 @@ async fn ownership_authorities_stay_read_only_even_when_named_as_writable_roots(
             "ownership authority was writable"
         );
     }
+}
+
+#[tokio::test]
+async fn genuine_metadata_writer_prepares_and_protects_its_future_publication_stage() {
+    if !prerequisites().await {
+        return;
+    }
+    let (_temp, _repo, workspace) = repository();
+    for name in [".git", ".codex", ".agents"] {
+        fs::create_dir(workspace.join(name)).expect("genuine empty metadata");
+    }
+    let before = [".git", ".codex", ".agents"].map(|name| metadata_id(&workspace.join(name)));
+    assert_success(
+        &run(
+            &workspace,
+            &[],
+            &["/bin/sh", "-c", "printf ordinary > ordinary"],
+        )
+        .await,
+    );
+    assert_eq!(get_git_repo_root(&workspace), Some(workspace.clone()));
+    assert_eq!(
+        [".git", ".codex", ".agents"].map(|name| metadata_id(&workspace.join(name))),
+        before
+    );
+    let stage = existing_synthetic_metadata_authorities()
+        .expect("authenticated authorities")
+        .into_iter()
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".codex-synthetic-stage-v2-")
+            }) && path
+                .parent()
+                .is_some_and(|parent| workspace.starts_with(parent))
+        })
+        .expect("stage exists despite all metadata being genuine");
+    let sentinel = stage.join(format!(
+        "test-owned-{}",
+        workspace.file_name().unwrap().to_string_lossy()
+    ));
+    fs::write(&sentinel, b"test-owned sentinel").expect("create test-owned authority sentinel");
+    let output = run(&workspace, std::slice::from_ref(&stage), &[
+        "/bin/sh", "-c", "if printf forged > \"$1\" 2>/dev/null; then exit 51; fi; if rm \"$1\" 2>/dev/null; then exit 52; fi; if mv \"$1\" \"$1-moved\" 2>/dev/null; then exit 53; fi",
+        "sh", sentinel.to_str().expect("sentinel path"),
+    ]).await;
+    assert_success(&output);
+    assert_eq!(
+        fs::read(&sentinel).expect("sentinel preserved"),
+        b"test-owned sentinel"
+    );
+    fs::remove_file(sentinel).expect("remove only test-owned sentinel");
+}
+
+#[tokio::test]
+async fn nss_home_as_an_extra_writable_root_keeps_its_codex_authority_protected() {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    if !prerequisites().await {
+        return;
+    }
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found = std::ptr::null_mut();
+    let mut buffer = vec![0_u8; 65536];
+    assert_eq!(
+        unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                &mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        },
+        0
+    );
+    assert!(!found.is_null());
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes(),
+    ));
+    let probe = tempfile::tempdir_in(&home).expect("test-owned NSS home directory");
+    let workspace = tempfile::tempdir_in("/var/tmp").expect("workspace");
+    let output = run(workspace.path(), std::slice::from_ref(&home), &[
+        "/bin/sh", "-c", "printf workspace > ordinary; printf home > \"$1/ordinary\"; if printf forged > \"$2/.codex/synthetic-metadata-v2/forged\" 2>/dev/null; then exit 71; fi",
+        "sh", probe.path().to_str().expect("probe"), home.to_str().expect("NSS home"),
+    ]).await;
+    assert_success(&output);
+    assert_eq!(
+        fs::read(workspace.path().join("ordinary")).unwrap(),
+        b"workspace"
+    );
+    assert_eq!(fs::read(probe.path().join("ordinary")).unwrap(), b"home");
 }
