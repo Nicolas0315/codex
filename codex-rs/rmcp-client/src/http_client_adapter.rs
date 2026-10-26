@@ -415,6 +415,9 @@ fn client_jsonrpc_message_fields(
                 ClientNotification::RootsListChangedNotification(notification) => {
                     notification.method.as_str()
                 }
+                ClientNotification::TaskStatusNotification(notification) => {
+                    notification.method.as_str()
+                }
                 ClientNotification::CustomNotification(notification) => {
                     notification.method.as_str()
                 }
@@ -551,7 +554,7 @@ async fn collect_body(
 fn sse_stream_from_body(
     body_stream: HttpResponseBodyStream,
 ) -> BoxStream<'static, std::result::Result<Sse, sse_stream::Error>> {
-    SseStream::from_byte_stream(stream::unfold(body_stream, |mut body_stream| async move {
+    SseStream::from_bytes_stream(stream::unfold(body_stream, |mut body_stream| async move {
         match body_stream.recv().await {
             Ok(Some(bytes)) => Some((Ok(Bytes::from(bytes)), body_stream)),
             Ok(None) => None,

@@ -11,6 +11,7 @@ use reqwest::Identity as ReqwestIdentity;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
+use reqwest_otlp as reqwest;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -113,9 +114,7 @@ fn build_http_client_inner(
                 location.display()
             ))
         })?;
-        builder = builder
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(certificate);
+        builder = builder.tls_certs_only([certificate]);
     }
 
     match (&tls.client_certificate, &tls.client_private_key) {
@@ -160,9 +159,7 @@ pub(crate) fn build_async_http_client(
                     location.display()
                 ))
             })?;
-            builder = builder
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(certificate);
+            builder = builder.tls_certs_only([certificate]);
         }
 
         match (&tls.client_certificate, &tls.client_private_key) {
@@ -270,3 +267,7 @@ mod tests {
         assert!(client.is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "otlp_tls_tests.rs"]
+mod tls_tests;

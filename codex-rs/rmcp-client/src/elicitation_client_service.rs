@@ -72,9 +72,9 @@ impl Service<RoleClient> for ElicitationClientService {
         context: RequestContext<RoleClient>,
     ) -> Result<ClientResult, rmcp::ErrorData> {
         match request {
-            ServerRequest::CreateElicitationRequest(request) => {
+            ServerRequest::ElicitRequest(request) => {
                 let response = self.create_elicitation(request.params, context).await?;
-                // RMCP's typed CreateElicitationResult does not model result-level `_meta`.
+                // Preserve the raw result-level `_meta` accepted by Codex's wire response.
                 let result = elicitation_response_result(response)?;
                 Ok(ClientResult::CustomResult(result))
             }

@@ -24,7 +24,7 @@ use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
 use rmcp::model::CallToolResult;
-use rmcp::model::Content;
+use rmcp::model::ContentBlock as Content;
 use rmcp::model::RequestId;
 use serde_json::json;
 use tokio::sync::Mutex;

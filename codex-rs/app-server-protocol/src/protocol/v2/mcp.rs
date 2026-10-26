@@ -271,12 +271,15 @@ impl From<McpServerElicitationAction> for rmcp::model::ElicitationAction {
     }
 }
 
-impl From<rmcp::model::ElicitationAction> for McpServerElicitationAction {
-    fn from(value: rmcp::model::ElicitationAction) -> Self {
+impl TryFrom<rmcp::model::ElicitationAction> for McpServerElicitationAction {
+    type Error = anyhow::Error;
+
+    fn try_from(value: rmcp::model::ElicitationAction) -> Result<Self, Self::Error> {
         match value {
-            rmcp::model::ElicitationAction::Accept => Self::Accept,
-            rmcp::model::ElicitationAction::Decline => Self::Decline,
-            rmcp::model::ElicitationAction::Cancel => Self::Cancel,
+            rmcp::model::ElicitationAction::Accept => Ok(Self::Accept),
+            rmcp::model::ElicitationAction::Decline => Ok(Self::Decline),
+            rmcp::model::ElicitationAction::Cancel => Ok(Self::Cancel),
+            _ => anyhow::bail!("unsupported MCP elicitation action"),
         }
     }
 }
@@ -688,22 +691,24 @@ pub struct McpServerElicitationRequestResponse {
     pub meta: Option<JsonValue>,
 }
 
-impl From<McpServerElicitationRequestResponse> for rmcp::model::CreateElicitationResult {
+impl From<McpServerElicitationRequestResponse> for rmcp::model::ElicitResult {
     fn from(value: McpServerElicitationRequestResponse) -> Self {
-        Self {
-            action: value.action.into(),
-            content: value.content,
-            meta: None,
+        let mut result = Self::new(value.action.into());
+        if let Some(content) = value.content {
+            result = result.with_content(content);
         }
+        result
     }
 }
 
-impl From<rmcp::model::CreateElicitationResult> for McpServerElicitationRequestResponse {
-    fn from(value: rmcp::model::CreateElicitationResult) -> Self {
-        Self {
-            action: value.action.into(),
+impl TryFrom<rmcp::model::ElicitResult> for McpServerElicitationRequestResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(value: rmcp::model::ElicitResult) -> Result<Self, Self::Error> {
+        Ok(Self {
+            action: value.action.try_into()?,
             content: value.content,
             meta: None,
-        }
+        })
     }
 }

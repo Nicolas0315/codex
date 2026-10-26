@@ -4638,6 +4638,15 @@ mod tests {
         );
         setup(&mut composer);
         let footer_props = composer.footer_props();
+        let name = if footer_props.is_wsl
+            && matches!(
+                name,
+                "footer_mode_shortcut_overlay" | "footer_mode_shortcut_overlay_queue_submissions"
+            ) {
+            format!("{name}_wsl")
+        } else {
+            name.to_string()
+        };
         let footer_lines = footer_height(&footer_props);
         let footer_spacing = ChatComposer::footer_spacing(footer_lines);
         let height = footer_lines + footer_spacing + 8;
@@ -4645,7 +4654,7 @@ mod tests {
         terminal
             .draw(|f| composer.render(f.area(), f.buffer_mut()))
             .unwrap();
-        insta::assert_snapshot!(name, terminal.backend());
+        insta::assert_snapshot!(name.as_str(), terminal.backend());
     }
 
     fn snapshot_composer_state<F>(name: &str, enhanced_keys_supported: bool, setup: F)

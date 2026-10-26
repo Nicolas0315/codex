@@ -213,6 +213,7 @@ impl RequestPluginInstallHandler {
                 Some(ElicitationAction::Accept) => "accept",
                 Some(ElicitationAction::Decline) => "decline",
                 Some(ElicitationAction::Cancel) => "cancel",
+                Some(_) => "unsupported",
                 None => "unavailable",
             };
             turn.session_telemetry.record_plugin_install_suggestion(
