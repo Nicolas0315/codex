@@ -239,14 +239,27 @@ async fn python_getpwuid_works_under_sandbox() {
     #[cfg(not(target_os = "linux"))]
     let sandbox_env = HashMap::new();
 
-    if std::process::Command::new("python3")
-        .arg("--version")
-        .status()
-        .is_err()
+    // The child runs with a cleared environment. Resolve the interpreter now
+    // so its PATH lookup cannot select a different Python installation.
+    let interpreter = match std::process::Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
     {
-        eprintln!("python3 not found in PATH, skipping test.");
-        return;
-    }
+        Ok(output) => output,
+        Err(_) => {
+            eprintln!("python3 not found in PATH, skipping test.");
+            return;
+        }
+    };
+    assert!(
+        interpreter.status.success(),
+        "python3 executable lookup failed"
+    );
+    let python_executable = String::from_utf8(interpreter.stdout)
+        .expect("Python executable path should be UTF-8")
+        .trim()
+        .to_owned();
+    assert!(std::path::Path::new(&python_executable).is_absolute());
 
     let permission_profile = PermissionProfile::read_only();
     let command_cwd = AbsolutePathBuf::current_dir().expect("should be able to get current dir");
@@ -254,7 +267,7 @@ async fn python_getpwuid_works_under_sandbox() {
 
     let mut child = spawn_command_under_sandbox(
         vec![
-            "python3".to_string(),
+            python_executable,
             "-c".to_string(),
             "import pwd, os; print(pwd.getpwuid(os.getuid()))".to_string(),
         ],
