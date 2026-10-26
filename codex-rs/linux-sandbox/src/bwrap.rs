@@ -217,6 +217,11 @@ impl SyntheticMountTarget {
             }
         }
 
+        // Legacy registrations do not prove directory ownership. Preserve
+        // directories, including legitimate replacements at the same path.
+        if self.kind == SyntheticMountTargetKind::EmptyDirectory {
+            return false;
+        }
         match self.pre_existing_path {
             Some(pre_existing_path) => pre_existing_path != FileIdentity::from_metadata(metadata),
             None => true,
