@@ -839,7 +839,7 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
 
     loop {
         let dot_git = dir.join(".git");
-        if dot_git.exists() {
+        if dot_git.exists() && !codex_file_system::is_synthetic_metadata_directory(&dot_git) {
             return Some((dir, dot_git));
         }
 
@@ -863,7 +863,7 @@ async fn find_ancestor_git_entry_with_fs(
         if fs
             .get_metadata(&dot_git_uri, /*sandbox*/ None)
             .await
-            .is_ok()
+            .is_ok_and(|metadata| !metadata.is_synthetic_directory)
         {
             return Some((dir, dot_git));
         }
@@ -917,6 +917,31 @@ mod tests {
     use pretty_assertions::assert_eq;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn repo_root_preserves_existing_empty_git_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).expect("empty real git directory");
+        let cwd = checkout.join("nested");
+        std::fs::create_dir(&cwd).expect("nested directory");
+        assert_eq!(get_git_repo_root(&cwd), Some(checkout));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repo_root_skips_owned_synthetic_git_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).expect("real git directory");
+        let nested = checkout.join("nested");
+        std::fs::create_dir(&nested).expect("nested directory");
+        let synthetic = nested.join(".git");
+        codex_file_system::prepare_synthetic_metadata_directory(&synthetic)
+            .expect("publish owned marker");
+        assert_eq!(get_git_repo_root(&nested), Some(checkout));
+        assert!(synthetic.is_dir());
+    }
 
     #[test]
     fn canonicalize_git_remote_url_normalizes_github_variants() {

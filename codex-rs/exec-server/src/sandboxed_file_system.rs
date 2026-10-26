@@ -163,6 +163,7 @@ impl SandboxedFileSystem {
             .map_err(map_sandbox_error)?;
         Ok(FileMetadata {
             is_directory: response.is_directory,
+            is_synthetic_directory: response.is_synthetic_directory,
             is_file: response.is_file,
             is_symlink: response.is_symlink,
             size: response.size,

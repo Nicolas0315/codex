@@ -54,6 +54,8 @@ pub struct CopyOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMetadata {
     pub is_directory: bool,
+    /// Whether this directory is a Codex-owned synthetic sandbox mountpoint.
+    pub is_synthetic_directory: bool,
     pub is_file: bool,
     pub is_symlink: bool,
     /// Size in bytes.

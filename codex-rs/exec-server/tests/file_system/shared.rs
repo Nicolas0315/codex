@@ -50,6 +50,47 @@ fn sandbox_context_from_profile_preserves_workspace_write_read_only_subpaths() -
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_metadata_preserves_owned_directory_flag_across_transport_and_sandbox(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let synthetic = tmp.path().join(".git");
+    codex_file_system::prepare_synthetic_metadata_directory(&synthetic)?;
+    let real = tmp.path().join(".codex");
+    std::fs::create_dir(&real)?;
+    codex_file_system::prepare_synthetic_metadata_directory(&real)?;
+    let sandbox = read_only_sandbox(tmp.path().to_path_buf());
+    for sandbox in [None, Some(&sandbox)] {
+        for (path, is_synthetic_directory) in [(&synthetic, true), (&real, false)] {
+            let metadata = context
+                .file_system
+                .get_metadata(&PathUri::from_path(path)?, sandbox)
+                .await
+                .with_context(|| format!("mode={implementation}, path={}", path.display()))?;
+            assert_eq!(
+                metadata,
+                FileMetadata {
+                    is_directory: true,
+                    is_synthetic_directory,
+                    is_file: false,
+                    is_symlink: false,
+                    size: std::fs::metadata(path)?.len(),
+                    created_at_ms: metadata.created_at_ms,
+                    modified_at_ms: metadata.modified_at_ms,
+                }
+            );
+        }
+    }
+    assert!(synthetic.is_dir());
+    assert!(real.is_dir());
+    Ok(())
+}
+
 #[test_case(FileSystemImplementation::Local ; "local")]
 #[test_case(FileSystemImplementation::Remote ; "remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -73,6 +114,7 @@ async fn file_system_get_metadata_reports_files_and_directories(
         file_metadata,
         FileMetadata {
             is_directory: false,
+            is_synthetic_directory: false,
             is_file: true,
             is_symlink: false,
             size: 5,
@@ -90,6 +132,7 @@ async fn file_system_get_metadata_reports_files_and_directories(
         directory_metadata,
         FileMetadata {
             is_directory: true,
+            is_synthetic_directory: false,
             is_file: false,
             is_symlink: false,
             size: std::fs::metadata(&directory_path)?.len(),
@@ -472,6 +515,7 @@ async fn file_system_sandboxed_metadata_and_read_allow_readable_root(
         metadata,
         FileMetadata {
             is_directory: false,
+            is_synthetic_directory: false,
             is_file: true,
             is_symlink: false,
             size: 15,

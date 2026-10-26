@@ -287,6 +287,8 @@ pub struct FsGetMetadataParams {
 #[serde(rename_all = "camelCase")]
 pub struct FsGetMetadataResponse {
     pub is_directory: bool,
+    #[serde(default)]
+    pub is_synthetic_directory: bool,
     pub is_file: bool,
     pub is_symlink: bool,
     pub size: u64,
@@ -494,12 +496,54 @@ mod base64_bytes {
 
 #[cfg(test)]
 mod tests {
+    use super::FsGetMetadataResponse;
     use super::FsReadFileParams;
     use super::HttpRequestParams;
     use codex_file_system::FileSystemSandboxContext;
     use codex_protocol::models::PermissionProfile;
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn filesystem_metadata_accepts_legacy_responses_and_preserves_synthetic_flag() {
+        let legacy = serde_json::json!({
+            "isDirectory": true,
+            "isFile": false,
+            "isSymlink": false,
+            "size": 4096,
+            "createdAtMs": 12,
+            "modifiedAtMs": 34,
+        });
+        let metadata: FsGetMetadataResponse =
+            serde_json::from_value(legacy.clone()).expect("legacy metadata should deserialize");
+        assert_eq!(
+            metadata,
+            FsGetMetadataResponse {
+                is_directory: true,
+                is_synthetic_directory: false,
+                is_file: false,
+                is_symlink: false,
+                size: 4096,
+                created_at_ms: 12,
+                modified_at_ms: 34,
+            }
+        );
+        let synthetic = FsGetMetadataResponse {
+            is_synthetic_directory: true,
+            ..metadata
+        };
+        let mut expected = legacy;
+        expected["isSyntheticDirectory"] = serde_json::json!(true);
+        assert_eq!(
+            serde_json::to_value(&synthetic).expect("metadata should serialize"),
+            expected
+        );
+        assert_eq!(
+            serde_json::from_value::<FsGetMetadataResponse>(expected)
+                .expect("synthetic metadata should deserialize"),
+            synthetic
+        );
+    }
 
     #[test]
     fn filesystem_protocol_accepts_legacy_absolute_paths_and_serializes_path_uris() {

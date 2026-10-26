@@ -433,7 +433,8 @@ async fn find_project_root(
             let marker_path = ancestor.join(marker);
             let marker_path_uri = PathUri::from_abs_path(&marker_path);
             match fs.get_metadata(&marker_path_uri, /*sandbox*/ None).await {
-                Ok(_) => return ancestor,
+                Ok(metadata) if !metadata.is_synthetic_directory => return ancestor,
+                Ok(_) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => {
                     tracing::warn!(

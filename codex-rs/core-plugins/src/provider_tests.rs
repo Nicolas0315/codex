@@ -136,6 +136,7 @@ impl ExecutorFileSystem for SyntheticPluginFileSystem {
             };
             Ok(FileMetadata {
                 is_directory,
+                is_synthetic_directory: false,
                 is_file,
                 is_symlink: false,
                 size: 0,
