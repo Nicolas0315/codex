@@ -19,6 +19,19 @@ use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 
+mod synthetic_metadata;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::existing_synthetic_metadata_authorities;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::initialize_synthetic_metadata_registry;
+pub use synthetic_metadata::is_synthetic_metadata_directory;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::prepare_synthetic_metadata_directory;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::synthetic_metadata_authority_paths;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::synthetic_metadata_registry_path;
+
 /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
 pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
 
