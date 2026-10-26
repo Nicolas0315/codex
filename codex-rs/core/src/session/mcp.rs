@@ -524,6 +524,7 @@ fn guardian_elicitation_review_request(
                 GuardianElicitationReview::NotRequested
             };
         }
+        _ => return GuardianElicitationReview::Decline("unsupported MCP elicitation request"),
     };
 
     let Some(meta) = meta.as_ref().map(|meta| &meta.0) else {
@@ -591,6 +592,7 @@ fn elicitation_connector_id(elicitation: &CreateElicitationRequestParams) -> Opt
         | CreateElicitationRequestParams::UrlElicitationParams { meta, .. } => meta
             .as_ref()
             .and_then(|meta| metadata_str(&meta.0, MCP_ELICITATION_CONNECTOR_ID_KEY)),
+        _ => None,
     }
 }
 

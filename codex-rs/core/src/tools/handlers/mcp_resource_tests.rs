@@ -1,33 +1,14 @@
 use super::*;
 use pretty_assertions::assert_eq;
-use rmcp::model::AnnotateAble;
 use rmcp::model::ResourceContents;
 use serde_json::json;
 
 fn resource(uri: &str, name: &str) -> Resource {
-    rmcp::model::RawResource {
-        uri: uri.to_string(),
-        name: name.to_string(),
-        title: None,
-        description: None,
-        mime_type: None,
-        size: None,
-        icons: None,
-        meta: None,
-    }
-    .no_annotation()
+    Resource::new(uri, name)
 }
 
 fn template(uri_template: &str, name: &str) -> ResourceTemplate {
-    rmcp::model::RawResourceTemplate {
-        uri_template: uri_template.to_string(),
-        name: name.to_string(),
-        title: None,
-        description: None,
-        mime_type: None,
-        icons: None,
-    }
-    .no_annotation()
+    ResourceTemplate::new(uri_template, name)
 }
 
 #[test]

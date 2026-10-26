@@ -199,6 +199,7 @@ impl ElicitationRequestManager {
                         url,
                         elicitation_id,
                     },
+                    _ => anyhow::bail!("unsupported MCP elicitation request"),
                 };
                 let (tx, rx) = oneshot::channel();
                 {
@@ -252,5 +253,6 @@ fn can_auto_accept_elicitation(elicitation: &CreateElicitationRequestParams) -> 
             requested_schema.properties.is_empty()
         }
         CreateElicitationRequestParams::UrlElicitationParams { .. } => false,
+        _ => false,
     }
 }

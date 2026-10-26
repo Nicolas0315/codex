@@ -1,0 +1,64 @@
+# Backport duplicate dependency-version selection from hermeticbuild/rules_rs
+# commit 41d00d4c7ad59c0494d939d7267e8c915ab7c2aa:
+# rs/private/cargo_workspace_graph.bzl, compute_package_fq_deps and
+# select_package_fq_dep (Apache-2.0).
+# Preserve every Cargo.lock candidate and select the manifest's required version
+# before validation and Bazel label generation, including renamed dependencies.
+# A missing semver match remains a hard lockfile error instead of omitting a dep.
+
+--- a/rs/extensions.bzl
++++ b/rs/extensions.bzl
+@@ -608,7 +608,7 @@
+         for dep in package["dependencies"]:
+             source = dep["source"]
+             dep_name = dep["name"]
+-            dep_fq = fq_deps.get(dep_name)
++            dep_fq = _select_package_fq_dep(dep, fq_deps)
+             dep_version = None
+             if dep_fq:
+                 dep_version = dep_fq[len(dep_name) + 1:]
+@@ -1136,7 +1136,7 @@
+     return facts
+ 
+ def _compute_package_fq_deps(package, versions_by_name, strict = True):
+-    possible_dep_fq_crate_by_name = {}
++    possible_dep_fq_crates_by_name = {}
+ 
+     for maybe_fq_dep in package.get("dependencies", []):
+         idx = maybe_fq_dep.find(" ")
+@@ -1153,9 +1153,32 @@
+             dep = maybe_fq_dep[:idx]
+             resolved_version = maybe_fq_dep[idx + 1:]
+ 
+-        possible_dep_fq_crate_by_name[dep] = _fq_crate(dep, resolved_version)
+-
+-    return possible_dep_fq_crate_by_name
++        _add_to_dict(possible_dep_fq_crates_by_name, dep, _fq_crate(dep, resolved_version))
++
++    return possible_dep_fq_crates_by_name
++
++def _select_package_fq_dep(dep, fq_deps):
++    dep_package = dep.get("package") or dep["name"]
++    candidates = fq_deps.get(dep_package)
++    if not candidates:
++        return None
++
++    if len(candidates) == 1:
++        return candidates[0]
++
++    req = dep.get("req")
++    if not req:
++        return None
++
++    versions = [
++        candidate[len(dep_package) + 1:]
++        for candidate in candidates
++    ]
++    version = select_matching_version(req, versions)
++    if not version:
++        fail("Cargo.lock has no version of %s matching %s among %s" % (dep_package, req, versions))
++
++    return _fq_crate(dep_package, version)
+ 
+ def _compute_workspace_fq_deps(workspace_members, versions_by_name):
+     workspace_fq_deps = {}

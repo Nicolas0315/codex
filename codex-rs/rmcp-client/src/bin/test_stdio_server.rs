@@ -16,8 +16,6 @@ use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::ListToolsResult;
 use rmcp::model::PaginatedRequestParams;
-use rmcp::model::RawResource;
-use rmcp::model::RawResourceTemplate;
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
 use rmcp::model::Resource;
@@ -294,31 +292,17 @@ impl TestToolServer {
     }
 
     fn memo_resource() -> Resource {
-        let raw = RawResource {
-            uri: MEMO_URI.to_string(),
-            name: "example-note".to_string(),
-            title: Some("Example Note".to_string()),
-            description: Some("A sample MCP resource exposed for integration tests.".to_string()),
-            mime_type: Some("text/plain".to_string()),
-            size: None,
-            icons: None,
-            meta: None,
-        };
-        Resource::new(raw, None)
+        Resource::new(MEMO_URI, "example-note")
+            .with_title("Example Note")
+            .with_description("A sample MCP resource exposed for integration tests.")
+            .with_mime_type("text/plain")
     }
 
     fn memo_template() -> ResourceTemplate {
-        let raw = RawResourceTemplate {
-            uri_template: "memo://codex/{slug}".to_string(),
-            name: "codex-memo".to_string(),
-            title: Some("Codex Memo".to_string()),
-            description: Some(
-                "Template for memo://codex/{slug} resources used in tests.".to_string(),
-            ),
-            mime_type: Some("text/plain".to_string()),
-            icons: None,
-        };
-        ResourceTemplate::new(raw, None)
+        ResourceTemplate::new("memo://codex/{slug}", "codex-memo")
+            .with_title("Codex Memo")
+            .with_description("Template for memo://codex/{slug} resources used in tests.")
+            .with_mime_type("text/plain")
     }
 
     fn memo_text() -> &'static str {
@@ -530,9 +514,9 @@ impl ServerHandler for TestToolServer {
                     )
                 })?;
 
-                Ok(CallToolResult::success(vec![rmcp::model::Content::image(
-                    data_b64, mime_type,
-                )]))
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::image(data_b64, mime_type),
+                ]))
             }
             "image_scenario" => {
                 let args = Self::parse_call_args::<ImageScenarioArgs>(&request, "image_scenario")?;
@@ -590,7 +574,7 @@ impl TestToolServer {
         let mut content = Vec::new();
         match args.scenario {
             ImageScenario::ImageOnly => {
-                content.push(rmcp::model::Content::image(valid_data_b64, mime_type));
+                content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
             }
             ImageScenario::ImageOnlyOriginalDetail => {
                 let mut meta = rmcp::model::Meta::new();
@@ -598,46 +582,41 @@ impl TestToolServer {
                     "codex/imageDetail".to_string(),
                     serde_json::json!("original"),
                 );
-                content.push(rmcp::model::Annotated::new(
-                    rmcp::model::RawContent::Image(rmcp::model::RawImageContent {
-                        data: valid_data_b64,
-                        mime_type,
-                        meta: Some(meta),
-                    }),
-                    None,
+                content.push(rmcp::model::ContentBlock::Image(
+                    rmcp::model::ImageContent::new(valid_data_b64, mime_type).with_meta(meta),
                 ));
             }
             ImageScenario::TextThenImage => {
-                content.push(rmcp::model::Content::text(caption));
-                content.push(rmcp::model::Content::image(valid_data_b64, mime_type));
+                content.push(rmcp::model::ContentBlock::text(caption));
+                content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
             }
             ImageScenario::InvalidBase64ThenImage => {
-                content.push(rmcp::model::Content::image(
+                content.push(rmcp::model::ContentBlock::image(
                     "not-base64".to_string(),
                     "image/png".to_string(),
                 ));
-                content.push(rmcp::model::Content::image(valid_data_b64, mime_type));
+                content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
             }
             ImageScenario::InvalidImageBytesThenImage => {
-                content.push(rmcp::model::Content::image(
+                content.push(rmcp::model::ContentBlock::image(
                     "bm90IGFuIGltYWdl".to_string(),
                     "image/png".to_string(),
                 ));
-                content.push(rmcp::model::Content::image(valid_data_b64, mime_type));
+                content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
             }
             ImageScenario::MultipleValidImages => {
-                content.push(rmcp::model::Content::image(
+                content.push(rmcp::model::ContentBlock::image(
                     valid_data_b64.clone(),
                     mime_type.clone(),
                 ));
-                content.push(rmcp::model::Content::image(valid_data_b64, mime_type));
+                content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
             }
             ImageScenario::ImageThenText => {
-                content.push(rmcp::model::Content::image(valid_data_b64, mime_type));
-                content.push(rmcp::model::Content::text(caption));
+                content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
+                content.push(rmcp::model::ContentBlock::text(caption));
             }
             ImageScenario::TextOnly => {
-                content.push(rmcp::model::Content::text(caption));
+                content.push(rmcp::model::ContentBlock::text(caption));
             }
         }
 

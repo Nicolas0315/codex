@@ -1,5 +1,7 @@
 //! Root of the `codex-core` library.
 
+// Resolve Send for the nested RMCP/HTTP client future types.
+#![recursion_limit = "256"]
 // Prevent accidental direct writes to stdout/stderr in library code. All
 // user-visible output must go through the appropriate abstraction (e.g.,
 // the TUI or the tracing stack).

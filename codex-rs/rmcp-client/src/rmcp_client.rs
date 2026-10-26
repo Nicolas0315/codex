@@ -26,9 +26,9 @@ use rmcp::model::CallToolResult;
 use rmcp::model::ClientNotification;
 use rmcp::model::ClientRequest;
 use rmcp::model::CreateElicitationRequestParams;
-use rmcp::model::CreateElicitationResult;
 use rmcp::model::CustomNotification;
 use rmcp::model::CustomRequest;
+use rmcp::model::ElicitResult;
 use rmcp::model::ElicitationAction;
 use rmcp::model::Extensions;
 use rmcp::model::InitializeRequestParams;
@@ -262,8 +262,8 @@ pub struct ElicitationResponse {
     pub meta: Option<serde_json::Value>,
 }
 
-impl From<CreateElicitationResult> for ElicitationResponse {
-    fn from(value: CreateElicitationResult) -> Self {
+impl From<ElicitResult> for ElicitationResponse {
+    fn from(value: ElicitResult) -> Self {
         Self {
             action: value.action,
             content: value.content,
@@ -272,13 +272,13 @@ impl From<CreateElicitationResult> for ElicitationResponse {
     }
 }
 
-impl From<ElicitationResponse> for CreateElicitationResult {
+impl From<ElicitationResponse> for ElicitResult {
     fn from(value: ElicitationResponse) -> Self {
-        Self {
-            action: value.action,
-            content: value.content,
-            meta: None,
+        let mut result = Self::new(value.action);
+        if let Some(content) = value.content {
+            result = result.with_content(content);
         }
+        result
     }
 }
 
@@ -438,7 +438,7 @@ impl RmcpClient {
             .peer()
             .peer_info()
             .ok_or_else(|| anyhow!("handshake succeeded but server info was missing"))?;
-        let initialize_result = initialize_result_rmcp.clone();
+        let initialize_result = initialize_result_rmcp.as_ref().clone();
 
         {
             let mut initialize_context = self.initialize_context.lock().await;

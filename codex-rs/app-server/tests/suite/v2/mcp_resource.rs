@@ -38,7 +38,6 @@ use rmcp::model::ListResourcesResult;
 use rmcp::model::Meta;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::ProtocolVersion;
-use rmcp::model::RawResource;
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
 use rmcp::model::Resource;
@@ -785,13 +784,10 @@ fn skill_resource(
     plugin_name: &str,
     skill_name: &str,
 ) -> Resource {
-    Resource::new(
-        RawResource::new(uri, name)
-            .with_description(description)
-            .with_mime_type(mime_type)
-            .with_meta(skill_resource_meta(plugin_name, skill_name)),
-        /*annotations*/ None,
-    )
+    Resource::new(uri, name)
+        .with_description(description)
+        .with_mime_type(mime_type)
+        .with_meta(skill_resource_meta(plugin_name, skill_name))
 }
 
 fn skill_resource_meta(plugin_name: &str, skill_name: &str) -> Meta {
