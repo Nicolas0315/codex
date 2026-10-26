@@ -8,6 +8,7 @@ mod environment_toml;
 mod file_read;
 mod fs_helper;
 mod fs_helper_main;
+mod fs_metadata_ownership;
 mod fs_sandbox;
 mod local_file_system;
 mod local_process;
