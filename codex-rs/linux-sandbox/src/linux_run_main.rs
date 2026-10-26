@@ -325,6 +325,8 @@ fn run_bwrap_with_proc_fallback(
     mount_proc: bool,
     allow_network_for_proxy: bool,
 ) -> ! {
+    crate::owned_metadata::validate_policy(file_system_sandbox_policy, sandbox_policy_cwd)
+        .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     let launcher = preferred_bwrap_launcher(file_system_sandbox_policy, sandbox_policy_cwd);
     let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
@@ -358,6 +360,8 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    crate::owned_metadata::protect_arguments(file_system_sandbox_policy, &mut bwrap_args.args)
+        .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     apply_inner_command_argv0(&launcher, &mut bwrap_args.args);
     run_or_exec_bwrap(&launcher, bwrap_args);
 }
@@ -458,7 +462,8 @@ fn preflight_proc_mount_support(
         file_system_sandbox_policy,
         network_mode,
     )?;
-    let stderr = run_bwrap_in_child_capture_stderr(launcher, preflight_argv);
+    let stderr =
+        run_bwrap_in_child_capture_stderr(launcher, preflight_argv, file_system_sandbox_policy);
     Ok(!is_proc_mount_failure(stderr.as_str()))
 }
 
@@ -1306,8 +1311,11 @@ fn exit_with_wait_status_or_policy_violation(
 ///   command, and reads are bounded to a fixed max size.
 fn run_bwrap_in_child_capture_stderr(
     launcher: &BubblewrapLauncher,
-    bwrap_args: crate::bwrap::BwrapArgs,
+    mut bwrap_args: crate::bwrap::BwrapArgs,
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
 ) -> String {
+    crate::owned_metadata::protect_arguments(file_system_sandbox_policy, &mut bwrap_args.args)
+        .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     const MAX_PREFLIGHT_STDERR_BYTES: u64 = 64 * 1024;
     let crate::bwrap::BwrapArgs {
         args,

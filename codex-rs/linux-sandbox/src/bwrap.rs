@@ -580,11 +580,16 @@ fn create_filesystem_args(
             .filter(|path| !unreadable_paths.contains(path))
             .filter(|path| !missing_auto_metadata_read_only_project_root_subpaths.contains(path))
             .collect();
-        let protected_metadata_names = writable_root.protected_metadata_names.clone();
+        // An explicitly writable file has no metadata children. Publishing a
+        // directory below it would reject otherwise valid file carveouts.
+        let protected_metadata_names = if mount_root.is_dir() {
+            writable_root.protected_metadata_names.clone()
+        } else {
+            Vec::new()
+        };
         append_metadata_path_masks_for_writable_root(
             &mut read_only_subpaths,
             root,
-            mount_root,
             &protected_metadata_names,
         );
         if let Some(target) = &symlink_target {
@@ -660,46 +665,14 @@ fn append_protected_create_targets_for_writable_root(
 fn append_metadata_path_masks_for_writable_root(
     read_only_subpaths: &mut Vec<PathBuf>,
     root: &Path,
-    mount_root: &Path,
     protected_metadata_names: &[String],
 ) {
     for name in protected_metadata_names {
         let path = root.join(name);
-        if should_leave_missing_git_for_parent_repo_discovery(mount_root, name) {
-            continue;
-        }
         if !read_only_subpaths.iter().any(|subpath| subpath == &path) {
             read_only_subpaths.push(path);
         }
     }
-}
-
-fn should_leave_missing_git_for_parent_repo_discovery(mount_root: &Path, name: &str) -> bool {
-    let path = mount_root.join(name);
-    name == ".git"
-        && matches!(
-            path.symlink_metadata(),
-            Err(err) if err.kind() == io::ErrorKind::NotFound
-        )
-        && mount_root
-            .ancestors()
-            .skip(1)
-            .any(ancestor_has_git_metadata)
-}
-
-fn ancestor_has_git_metadata(ancestor: &Path) -> bool {
-    let git_path = ancestor.join(".git");
-    let Ok(metadata) = git_path.symlink_metadata() else {
-        return false;
-    };
-    if metadata.is_dir() {
-        return git_path.join("HEAD").symlink_metadata().is_ok();
-    }
-    if metadata.is_file() {
-        return fs::read_to_string(git_path)
-            .is_ok_and(|contents| contents.trim_start().starts_with("gitdir:"));
-    }
-    false
 }
 
 fn expand_unreadable_globs_with_ripgrep(
@@ -1042,6 +1015,15 @@ fn append_read_only_subpath_args(
         )));
     }
 
+    if codex_file_system::is_synthetic_metadata_directory(subpath) {
+        bwrap_args.args.extend([
+            "--ro-bind".to_string(),
+            path_to_string(subpath),
+            path_to_string(subpath),
+        ]);
+        return Ok(());
+    }
+
     if let Some(metadata) = transient_empty_metadata_path(subpath)
         && is_within_allowed_write_paths(subpath, allowed_write_paths)
     {
@@ -1098,10 +1080,14 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
 
 fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
     if path.file_name().is_some_and(is_protected_metadata_name) {
-        append_empty_directory_args(bwrap_args, path);
-        bwrap_args
-            .synthetic_mount_targets
-            .push(SyntheticMountTarget::missing_empty_directory(path));
+        codex_file_system::prepare_synthetic_metadata_directory(path).map_err(|error| {
+            CodexErr::Fatal(format!("cannot publish owned sandbox metadata: {error}"))
+        })?;
+        bwrap_args.args.extend([
+            "--ro-bind".to_string(),
+            path_to_string(path),
+            path_to_string(path),
+        ]);
         return Ok(());
     }
 
@@ -1725,15 +1711,7 @@ mod tests {
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
         assert_eq!(args.preserved_files.len(), 1);
-        assert_eq!(
-            synthetic_mount_target_paths(&args),
-            vec![
-                blocked.clone(),
-                workspace.join(".git"),
-                workspace.join(".agents"),
-                workspace.join(".codex"),
-            ]
-        );
+        assert_eq!(synthetic_mount_target_paths(&args), vec![blocked.clone()]);
         assert!(
             !blocked.exists(),
             "missing path mask should not materialize host-side metadata paths at arg construction time",
@@ -1765,14 +1743,7 @@ mod tests {
         assert_empty_file_bound_without_perms(&args.args, &dot_git);
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
-        assert_eq!(
-            synthetic_mount_target_paths(&args),
-            vec![
-                dot_git.clone(),
-                workspace.join(".agents"),
-                workspace.join(".codex"),
-            ]
-        );
+        assert_eq!(synthetic_mount_target_paths(&args), vec![dot_git.clone()]);
         assert!(
             !args
                 .args
@@ -1788,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_child_git_under_parent_repo_uses_protected_create_target() {
+    fn missing_child_git_under_parent_repo_uses_owned_read_only_source() {
         let temp_dir = TempDir::new().expect("temp dir");
         let repo = temp_dir.path().join("repo");
         let workspace = repo.join("workspace");
@@ -1810,6 +1781,7 @@ mod tests {
             .expect("filesystem args");
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
+        assert_empty_directory_mounted_read_only(&args.args, &dot_git);
         let dot_git_str = path_to_string(&dot_git);
         assert!(
             !args
@@ -1824,8 +1796,8 @@ mod tests {
         );
         assert_eq!(
             protected_create_target_paths(&args),
-            vec![dot_git],
-            "missing child .git should fail through protected create cleanup",
+            Vec::<PathBuf>::new(),
+            "owned child .git must be protected at mount time",
         );
     }
 
@@ -1857,6 +1829,7 @@ mod tests {
                 .expect("filesystem args");
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
+        assert_empty_directory_mounted_read_only(&args.args, &dot_git);
         let dot_git_str = path_to_string(&dot_git);
         assert!(
             !args
@@ -1871,8 +1844,8 @@ mod tests {
         );
         assert_eq!(
             protected_create_target_paths(&args),
-            vec![dot_git],
-            "symlinked missing child .git should fail through protected create cleanup",
+            Vec::<PathBuf>::new(),
+            "owned child .git must be protected at mount time",
         );
     }
 
@@ -1957,10 +1930,7 @@ mod tests {
         assert_empty_directory_mounted_read_only(&args.args, Path::new(&dot_agents));
         assert_empty_directory_mounted_read_only(&args.args, Path::new(&dot_codex));
         assert!(args.preserved_files.is_empty());
-        let synthetic_targets = synthetic_mount_target_paths(&args);
-        assert!(synthetic_targets.contains(&PathBuf::from(&dot_git)));
-        assert!(synthetic_targets.contains(&PathBuf::from(&dot_agents)));
-        assert!(synthetic_targets.contains(&PathBuf::from(&dot_codex)));
+        assert!(synthetic_mount_target_paths(&args).is_empty());
         assert_eq!(
             protected_create_target_paths(&args),
             Vec::<PathBuf>::new(),
@@ -2010,90 +1980,49 @@ mod tests {
 
     #[test]
     fn mounts_dev_before_writable_dev_binds() {
-        let sandbox_policy = FileSystemSandboxPolicy::workspace_write(
-            &[AbsolutePathBuf::try_from(Path::new("/dev")).expect("/dev path")],
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
-        );
-
-        let args = create_filesystem_args(
-            &sandbox_policy,
-            Path::new("/"),
-            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
-        )
-        .expect("bwrap fs args");
+        // This ordering test grants metadata writes explicitly, avoiding any
+        // creation of host-root metadata. Missing protected names are covered
+        // separately with temporary workspace fixtures.
+        let mut entries = vec!["/", "/dev"]
+            .into_iter()
+            .map(|path| FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::from_absolute_path(path).expect("absolute root"),
+                },
+                access: FileSystemAccessMode::Write,
+            })
+            .collect::<Vec<_>>();
+        for root in ["/", "/dev"] {
+            for name in [".git", ".agents", ".codex"] {
+                entries.push(FileSystemSandboxEntry {
+                    path: FileSystemPath::Path {
+                        path: AbsolutePathBuf::from_absolute_path(Path::new(root).join(name))
+                            .expect("absolute metadata"),
+                    },
+                    access: FileSystemAccessMode::Write,
+                });
+            }
+        }
+        let policy = FileSystemSandboxPolicy::restricted(entries);
+        let args =
+            create_filesystem_args(&policy, Path::new("/"), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("bwrap fs args");
         assert!(args.preserved_files.is_empty());
-        assert_eq!(
-            synthetic_mount_target_paths(&args),
-            vec![
-                PathBuf::from("/.git"),
-                PathBuf::from("/.agents"),
-                PathBuf::from("/.codex"),
-                PathBuf::from("/dev/.git"),
-                PathBuf::from("/dev/.agents"),
-                PathBuf::from("/dev/.codex"),
-            ]
-        );
+        assert!(synthetic_mount_target_paths(&args).is_empty());
         assert_eq!(
             args.args,
-            vec![
-                // Start from a read-only view of the full filesystem.
-                "--ro-bind".to_string(),
-                "/".to_string(),
-                "/".to_string(),
-                // Recreate a writable /dev inside the sandbox.
-                "--dev".to_string(),
-                "/dev".to_string(),
-                // Make the writable root itself writable again.
-                "--bind".to_string(),
-                "/".to_string(),
-                "/".to_string(),
-                // Mask the default metadata path names under the writable root.
-                // Because the root is `/` in this test, these carveout paths
-                // appear directly below `/`.
-                "--perms".to_string(),
-                "555".to_string(),
-                "--tmpfs".to_string(),
-                "/.git".to_string(),
-                "--remount-ro".to_string(),
-                "/.git".to_string(),
-                "--perms".to_string(),
-                "555".to_string(),
-                "--tmpfs".to_string(),
-                "/.agents".to_string(),
-                "--remount-ro".to_string(),
-                "/.agents".to_string(),
-                "--perms".to_string(),
-                "555".to_string(),
-                "--tmpfs".to_string(),
-                "/.codex".to_string(),
-                "--remount-ro".to_string(),
-                "/.codex".to_string(),
-                // Rebind /dev after the root bind so device nodes remain
-                // writable/usable inside the writable root.
-                "--bind".to_string(),
-                "/dev".to_string(),
-                "/dev".to_string(),
-                // Then mask the metadata names that would otherwise be
-                // creatable below the writable /dev bind.
-                "--perms".to_string(),
-                "555".to_string(),
-                "--tmpfs".to_string(),
-                "/dev/.git".to_string(),
-                "--remount-ro".to_string(),
-                "/dev/.git".to_string(),
-                "--perms".to_string(),
-                "555".to_string(),
-                "--tmpfs".to_string(),
-                "/dev/.agents".to_string(),
-                "--remount-ro".to_string(),
-                "/dev/.agents".to_string(),
-                "--perms".to_string(),
-                "555".to_string(),
-                "--tmpfs".to_string(),
-                "/dev/.codex".to_string(),
-                "--remount-ro".to_string(),
-                "/dev/.codex".to_string(),
+            [
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--bind",
+                "/",
+                "/",
+                "--bind",
+                "/dev",
+                "/dev"
             ]
         );
     }
@@ -2683,6 +2612,15 @@ mod tests {
     }
 
     fn assert_empty_directory_mounted_read_only(args: &[String], path: &Path) {
+        if codex_file_system::is_synthetic_metadata_directory(path) {
+            let path = path_to_string(path);
+            assert!(
+                args.windows(3)
+                    .any(|window| window == ["--ro-bind", path.as_str(), path.as_str()]),
+                "expected owned read-only source for {path}: {args:#?}"
+            );
+            return;
+        }
         let path = path_to_string(path);
         assert!(
             args.windows(4)

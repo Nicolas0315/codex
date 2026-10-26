@@ -411,11 +411,23 @@ async fn sandbox_blocks_first_time_dot_codex_creation() {
     );
     let dot_codex_metadata = tokio::fs::symlink_metadata(&dot_codex).await;
     if let Ok(metadata) = dot_codex_metadata {
+        // Linux publishes an owned empty read-only source before executing the
+        // command. Its existence is distinct from the command creating data.
         assert!(
-            !metadata.is_dir(),
-            "{} should not be creatable as a directory",
+            !metadata.is_dir()
+                || codex_file_system::is_synthetic_metadata_directory(dot_codex.as_path()),
+            "{} must not be an unowned directory created by the command",
             dot_codex.display()
         );
+        if metadata.is_dir() {
+            assert_eq!(
+                std::fs::read_dir(&dot_codex)
+                    .expect("owned source remains readable")
+                    .count(),
+                0,
+                "the command must not populate protected metadata"
+            );
+        }
     } else if let Err(err) = &dot_codex_metadata {
         assert_eq!(
             err.kind(),
