@@ -36,7 +36,7 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::BooleanSchema;
 use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResult;
-use rmcp::model::Content;
+use rmcp::model::ContentBlock as Content;
 use rmcp::model::CreateElicitationRequestParams;
 use rmcp::model::ElicitationAction;
 use rmcp::model::ElicitationSchema;
@@ -629,6 +629,12 @@ impl ServerHandler for ToolAppsMcpServer {
                 }
                 ElicitationAction::Decline => "declined",
                 ElicitationAction::Cancel => "cancelled",
+                _ => {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "unsupported MCP elicitation action",
+                        None,
+                    ));
+                }
             };
             return Ok(CallToolResult::success(vec![Content::text(output)]));
         }
@@ -651,6 +657,12 @@ impl ServerHandler for ToolAppsMcpServer {
                 }
                 ElicitationAction::Decline => "declined",
                 ElicitationAction::Cancel => "cancelled",
+                _ => {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "unsupported MCP elicitation action",
+                        None,
+                    ));
+                }
             };
             return Ok(CallToolResult::success(vec![Content::text(output)]));
         }

@@ -16,6 +16,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::logging_client_handler::LoggingClientHandler;
+use crate::logging_client_handler::log_message;
 use crate::rmcp_client::Elicitation;
 use crate::rmcp_client::ElicitationPauseState;
 use crate::rmcp_client::ElicitationResponse;
@@ -72,9 +73,9 @@ impl Service<RoleClient> for ElicitationClientService {
         context: RequestContext<RoleClient>,
     ) -> Result<ClientResult, rmcp::ErrorData> {
         match request {
-            ServerRequest::CreateElicitationRequest(request) => {
+            ServerRequest::ElicitRequest(request) => {
                 let response = self.create_elicitation(request.params, context).await?;
-                // RMCP's typed CreateElicitationResult does not model result-level `_meta`.
+                // Preserve the raw result-level `_meta` accepted by Codex's wire response.
                 let result = elicitation_response_result(response)?;
                 Ok(ClientResult::CustomResult(result))
             }
@@ -94,6 +95,9 @@ impl Service<RoleClient> for ElicitationClientService {
         notification: ServerNotification,
         context: NotificationContext<RoleClient>,
     ) -> Result<(), rmcp::ErrorData> {
+        if let ServerNotification::LoggingMessageNotification(notification) = notification {
+            return log_message(notification.params);
+        }
         <LoggingClientHandler as Service<RoleClient>>::handle_notification(
             &self.handler,
             notification,
@@ -154,9 +158,9 @@ fn elicitation_response_result(
 mod tests {
     use pretty_assertions::assert_eq;
     use rmcp::model::BooleanSchema;
-    use rmcp::model::CreateElicitationRequestParams;
+    use rmcp::model::ElicitRequestParams;
     use rmcp::model::ElicitationSchema;
-    use rmcp::model::PrimitiveSchema;
+    use rmcp::model::PrimitiveSchemaDefinition;
     use serde_json::Value;
     use serde_json::json;
 
@@ -201,12 +205,15 @@ mod tests {
         );
     }
 
-    fn form_request(meta: Option<Meta>) -> CreateElicitationRequestParams {
-        CreateElicitationRequestParams::FormElicitationParams {
+    fn form_request(meta: Option<Meta>) -> ElicitRequestParams {
+        ElicitRequestParams::FormElicitationParams {
             meta,
             message: "Confirm?".to_string(),
             requested_schema: ElicitationSchema::builder()
-                .required_property("confirmed", PrimitiveSchema::Boolean(BooleanSchema::new()))
+                .required_property(
+                    "confirmed",
+                    PrimitiveSchemaDefinition::Boolean(BooleanSchema::new()),
+                )
                 .build()
                 .expect("schema should build"),
         }

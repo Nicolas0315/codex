@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::CommandExecutionSource as ExecCommandSource;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::Tool;
-use rmcp::model::Content;
+use rmcp::model::ContentBlock as Content;
 
 const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 async fn test_config() -> Config {
@@ -185,17 +185,11 @@ fn resource_link_block(
     title: Option<&str>,
     description: Option<&str>,
 ) -> serde_json::Value {
-    serde_json::to_value(Content::resource_link(rmcp::model::RawResource {
-        uri: uri.to_string(),
-        name: name.to_string(),
-        title: title.map(str::to_string),
-        description: description.map(str::to_string),
-        mime_type: None,
-        size: None,
-        icons: None,
-        meta: None,
-    }))
-    .expect("resource link content should serialize")
+    let mut resource = rmcp::model::Resource::new(uri, name);
+    resource.title = title.map(str::to_string);
+    resource.description = description.map(str::to_string);
+    serde_json::to_value(Content::resource_link(resource))
+        .expect("resource link content should serialize")
 }
 
 #[test]

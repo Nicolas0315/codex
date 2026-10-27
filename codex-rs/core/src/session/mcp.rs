@@ -16,7 +16,7 @@ use codex_protocol::mcp_approval_meta::TOOL_DESCRIPTION_KEY as MCP_ELICITATION_T
 use codex_protocol::mcp_approval_meta::TOOL_NAME_KEY as MCP_ELICITATION_TOOL_NAME_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_KEY as MCP_ELICITATION_TOOL_PARAMS_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_TITLE_KEY as MCP_ELICITATION_TOOL_TITLE_KEY;
-use rmcp::model::CreateElicitationRequestParams;
+use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitationAction;
 use rmcp::model::Meta;
 use serde_json::Map;
@@ -510,12 +510,12 @@ fn guardian_elicitation_review_request(
     request: &ElicitationReviewRequest,
 ) -> GuardianElicitationReview {
     let (meta, requested_schema) = match &request.elicitation {
-        CreateElicitationRequestParams::FormElicitationParams {
+        ElicitRequestParams::FormElicitationParams {
             meta,
             requested_schema,
             ..
         } => (meta, Some(requested_schema)),
-        CreateElicitationRequestParams::UrlElicitationParams { meta, .. } => {
+        ElicitRequestParams::UrlElicitationParams { meta, .. } => {
             return if meta_requests_approval_request(meta) {
                 GuardianElicitationReview::Decline(
                     "guardian MCP elicitation review only supports form elicitations",
@@ -524,6 +524,7 @@ fn guardian_elicitation_review_request(
                 GuardianElicitationReview::NotRequested
             };
         }
+        _ => return GuardianElicitationReview::Decline("unsupported MCP elicitation request"),
     };
 
     let Some(meta) = meta.as_ref().map(|meta| &meta.0) else {
@@ -585,12 +586,13 @@ fn guardian_elicitation_review_request(
     ))
 }
 
-fn elicitation_connector_id(elicitation: &CreateElicitationRequestParams) -> Option<&str> {
+fn elicitation_connector_id(elicitation: &ElicitRequestParams) -> Option<&str> {
     match elicitation {
-        CreateElicitationRequestParams::FormElicitationParams { meta, .. }
-        | CreateElicitationRequestParams::UrlElicitationParams { meta, .. } => meta
+        ElicitRequestParams::FormElicitationParams { meta, .. }
+        | ElicitRequestParams::UrlElicitationParams { meta, .. } => meta
             .as_ref()
             .and_then(|meta| metadata_str(&meta.0, MCP_ELICITATION_CONNECTOR_ID_KEY)),
+        _ => None,
     }
 }
 

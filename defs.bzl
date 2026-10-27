@@ -1,5 +1,5 @@
 load("@crates//:data.bzl", "DEP_DATA")
-load("@crates//:defs.bzl", "all_crate_deps")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//cargo/private:cargo_build_script_wrapper.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 load("//bazel/rules/testing:foreign_platform_binary.bzl", "foreign_platform_binary")
@@ -307,6 +307,7 @@ def codex_rust_crate(
             name = name,
             crate_name = crate_name,
             crate_features = crate_features,
+            aliases = aliases(),
             deps = all_crate_deps() + maybe_deps + deps_extra,
             compile_data = compile_data,
             data = lib_data_extra,
@@ -328,6 +329,7 @@ def codex_rust_crate(
             name = unit_test_binary,
             crate = name,
             crate_features = crate_features,
+            aliases = aliases(),
             deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
             # Unit tests also compile to standalone Windows executables, so
             # keep their stack reserve aligned with binaries and integration
@@ -376,6 +378,7 @@ def codex_rust_crate(
             name = binary,
             crate_name = binary.replace("-", "_"),
             crate_root = main,
+            aliases = aliases(),
             deps = all_crate_deps() + maybe_deps + deps_extra,
             edition = crate_edition,
             rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS,
@@ -476,6 +479,7 @@ def codex_rust_crate(
                 srcs = [test],
                 data = native.glob(["tests/**"], allow_empty = True) + integration_test_binaries + test_data_extra,
                 compile_data = native.glob(["tests/**"], allow_empty = True) + integration_compile_data_extra,
+                aliases = aliases(),
                 deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
                 # Bazel has emitted both `codex-rs/<crate>/...` and
                 # `../codex-rs/<crate>/...` paths for `file!()`. Strip either
@@ -515,6 +519,7 @@ def codex_rust_crate(
                 srcs = [test],
                 data = native.glob(["tests/**"], allow_empty = True) + integration_test_binaries + test_data_extra,
                 compile_data = native.glob(["tests/**"], allow_empty = True) + integration_compile_data_extra,
+                aliases = aliases(),
                 deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
                 # Bazel has emitted both `codex-rs/<crate>/...` and
                 # `../codex-rs/<crate>/...` paths for `file!()`. Strip either
@@ -588,6 +593,7 @@ def codex_rust_crate(
             srcs = [test],
             data = native.glob(["tests/**"], allow_empty = True) + integration_test_binaries + test_data_extra,
             compile_data = native.glob(["tests/**"], allow_empty = True) + integration_compile_data_extra,
+            aliases = aliases(),
             deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
             rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS + [
                 "--remap-path-prefix=../codex-rs=",

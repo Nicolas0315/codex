@@ -1815,15 +1815,11 @@ fn client_request_turn_start_granular_approval_policy_is_marked_experimental() {
 
 #[test]
 fn mcp_server_elicitation_response_round_trips_rmcp_result() {
-    let rmcp_result = rmcp::model::CreateElicitationResult {
-        action: rmcp::model::ElicitationAction::Accept,
-        content: Some(json!({
-            "confirmed": true,
-        })),
-        meta: None,
-    };
+    let rmcp_result = rmcp::model::ElicitResult::new(rmcp::model::ElicitationAction::Accept)
+        .with_content(json!({ "confirmed": true }));
 
-    let v2_response = McpServerElicitationRequestResponse::from(rmcp_result.clone());
+    let v2_response = McpServerElicitationRequestResponse::try_from(rmcp_result.clone())
+        .expect("known RMCP elicitation action should convert");
     assert_eq!(
         v2_response,
         McpServerElicitationRequestResponse {
@@ -1834,10 +1830,34 @@ fn mcp_server_elicitation_response_round_trips_rmcp_result() {
             meta: None,
         }
     );
-    assert_eq!(
-        rmcp::model::CreateElicitationResult::from(v2_response),
-        rmcp_result
-    );
+    assert_eq!(rmcp::model::ElicitResult::from(v2_response), rmcp_result);
+}
+
+#[test]
+fn mcp_server_elicitation_responses_preserve_decline_and_cancel_without_content() {
+    for (action, rmcp_action) in [
+        (
+            McpServerElicitationAction::Decline,
+            rmcp::model::ElicitationAction::Decline,
+        ),
+        (
+            McpServerElicitationAction::Cancel,
+            rmcp::model::ElicitationAction::Cancel,
+        ),
+    ] {
+        let response = McpServerElicitationRequestResponse {
+            action,
+            content: None,
+            meta: None,
+        };
+        let rmcp_result = rmcp::model::ElicitResult::from(response.clone());
+        assert_eq!(rmcp_result, rmcp::model::ElicitResult::new(rmcp_action));
+        assert_eq!(
+            McpServerElicitationRequestResponse::try_from(rmcp_result)
+                .expect("known RMCP elicitation action should convert"),
+            response
+        );
+    }
 }
 
 #[test]

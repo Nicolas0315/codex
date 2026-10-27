@@ -331,10 +331,13 @@ pub async fn resolve_elicitation(
         codex_protocol::approvals::ElicitationAction::Decline => ElicitationAction::Decline,
         codex_protocol::approvals::ElicitationAction::Cancel => ElicitationAction::Cancel,
     };
-    let content = match action {
+    let content = match decision {
         // Preserve the legacy fallback for clients that only send an action.
-        ElicitationAction::Accept => Some(content.unwrap_or_else(|| serde_json::json!({}))),
-        ElicitationAction::Decline | ElicitationAction::Cancel => None,
+        codex_protocol::approvals::ElicitationAction::Accept => {
+            Some(content.unwrap_or_else(|| serde_json::json!({})))
+        }
+        codex_protocol::approvals::ElicitationAction::Decline
+        | codex_protocol::approvals::ElicitationAction::Cancel => None,
     };
     let response = ElicitationResponse {
         action,

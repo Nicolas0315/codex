@@ -33,7 +33,7 @@ use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::McpAuthStatus;
 use futures::FutureExt;
 use pretty_assertions::assert_eq;
-use rmcp::model::CreateElicitationRequestParams;
+use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitationAction;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::JsonObject;
@@ -251,7 +251,7 @@ async fn disabled_permissions_auto_accept_elicitation_with_empty_form_schema() {
 
     let response = sender(
         NumberOrString::Number(1),
-        CreateElicitationRequestParams::FormElicitationParams {
+        ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "Confirm?".to_string(),
             requested_schema: rmcp::model::ElicitationSchema::builder()
@@ -284,16 +284,19 @@ async fn disabled_permissions_do_not_auto_accept_elicitation_with_requested_fiel
 
     let response = sender(
         NumberOrString::Number(1),
-        CreateElicitationRequestParams::FormElicitationParams {
+        ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "What should I say?".to_string(),
-            requested_schema: rmcp::model::ElicitationSchema::builder()
-                .required_property(
-                    "message",
-                    rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
-                )
-                .build()
-                .expect("schema should build"),
+            requested_schema:
+                rmcp::model::ElicitationSchema::builder()
+                    .required_property(
+                        "message",
+                        rmcp::model::PrimitiveSchemaDefinition::String(
+                            rmcp::model::StringSchema::new(),
+                        ),
+                    )
+                    .build()
+                    .expect("schema should build"),
         },
     )
     .await
@@ -1327,10 +1330,11 @@ fn elicitation_capability_uses_2025_06_18_shape_for_form_only_support() {
 
 #[test]
 fn elicitation_capability_advertises_url_support_when_enabled() {
-    let capability = Some(ElicitationCapability {
-        form: Some(rmcp::model::FormElicitationCapability::default()),
-        url: Some(rmcp::model::UrlElicitationCapability::default()),
-    });
+    let capability = Some(
+        ElicitationCapability::new()
+            .with_form(rmcp::model::FormElicitationCapability::new())
+            .with_url(rmcp::model::UrlElicitationCapability::new()),
+    );
     assert_eq!(
         serde_json::to_value(capability).expect("serialize elicitation capability"),
         serde_json::json!({
