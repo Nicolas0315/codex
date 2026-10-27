@@ -26,6 +26,8 @@ pub use synthetic_metadata::SyntheticMetadataProtection;
 pub use synthetic_metadata::existing_synthetic_metadata_authorities;
 #[cfg(target_os = "linux")]
 pub use synthetic_metadata::initialize_synthetic_metadata_registry;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::initialize_synthetic_metadata_storage;
 pub use synthetic_metadata::is_synthetic_metadata_directory;
 #[cfg(target_os = "linux")]
 pub use synthetic_metadata::prepare_synthetic_metadata_directory;
@@ -39,6 +41,8 @@ pub use synthetic_metadata::synthetic_metadata_authority_paths;
 pub use synthetic_metadata::synthetic_metadata_protection;
 #[cfg(target_os = "linux")]
 pub use synthetic_metadata::synthetic_metadata_registry_path;
+#[cfg(target_os = "linux")]
+pub use synthetic_metadata::validate_synthetic_metadata_writer;
 
 /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
 pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;

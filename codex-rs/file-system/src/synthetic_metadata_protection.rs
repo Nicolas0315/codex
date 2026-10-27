@@ -3,7 +3,6 @@
 use super::super::linux::*;
 use super::MountTable;
 use super::all_stages;
-use super::native_registry;
 use super::object_identity;
 use super::registry;
 use super::views;
@@ -141,6 +140,15 @@ pub(super) fn protection_with_mounts(
     cwd: &Path,
     mounts: &MountTable,
 ) -> io::Result<SyntheticMetadataProtection> {
+    protection_with_authorities(policy, cwd, mounts, &registry::Authorities::load()?)
+}
+
+pub(super) fn protection_with_authorities(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    mounts: &MountTable,
+    authorities: &registry::Authorities,
+) -> io::Result<SyntheticMetadataProtection> {
     let mut protection = SyntheticMetadataProtection {
         read_only: Vec::new(),
         bindings: Vec::new(),
@@ -214,170 +222,171 @@ pub(super) fn protection_with_mounts(
         // through an authority root that was absent during this preparation.
         views::prepare_cache_authority(&primary, mounts)?;
     }
-    match native_registry(/*initialize*/ false) {
-        Ok(registry) => {
-            let path = registry::path()?;
-            let public = path.join(OsString::from_vec(registry::PUBLIC.to_bytes().to_vec()));
-            let public_directory = match registry::records(&registry, AuthorityMode::ReadOnly) {
-                Ok(directory) => Some(directory),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error),
+    for (path, registry) in authorities.readers()? {
+        let public = path.join(OsString::from_vec(registry::PUBLIC.to_bytes().to_vec()));
+        let public_directory = match registry::records(&registry, AuthorityMode::ReadOnly) {
+            Ok(directory) => Some(directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut public_names = None;
+        for alias in mounts.aliases(&path) {
+            if !read_allowed(&alias) {
+                continue;
+            }
+            let format = alias.join("format");
+            let files = if public_read_allowed(&format) {
+                vec![format]
+            } else {
+                Vec::new()
             };
-            let mut public_names = None;
-            for alias in mounts.aliases(&path) {
-                if !read_allowed(&alias) {
+            let public_target = alias.join("public-records");
+            let public_binding = if let Some(directory) = &public_directory {
+                if !has_denied_children(&alias) {
+                    Some((public.clone(), public_target))
+                } else {
+                    let names = match &public_names {
+                        Some(names) => names,
+                        None => public_names.insert(public_record_candidates(directory)?),
+                    };
+                    let selected = names
+                        .iter()
+                        .filter(|name| public_read_allowed(&public_target.join(name)))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let access = if read_allowed(&public_target) {
+                        views::ViewAccess::Readable
+                    } else {
+                        views::ViewAccess::TraverseOnly
+                    };
+                    Some((
+                        views::filtered_view(directory, &selected, access)?,
+                        public_target,
+                    ))
+                }
+            } else {
+                let names = public_record_candidates(&registry)?;
+                let selected = names
+                    .into_iter()
+                    .filter(|name| public_read_allowed(&alias.join(name)))
+                    .collect::<Vec<_>>();
+                protection.bindings.push((
+                    views::filtered_view(&registry, &selected, views::ViewAccess::Readable)?,
+                    alias,
+                ));
+                continue;
+            };
+            protection.registries.push((alias, files, public_binding));
+        }
+        if let Some(directory) = &public_directory {
+            for alias in mounts.aliases(&public) {
+                if !read_allowed(&alias)
+                    || protection
+                        .registries
+                        .iter()
+                        .any(|(root, _, _)| alias.starts_with(root))
+                {
                     continue;
                 }
-                let format = alias.join("format");
-                let files = if public_read_allowed(&format) {
-                    vec![format]
+                if !has_denied_children(&alias) {
+                    protection.read_only.push(alias);
                 } else {
-                    Vec::new()
-                };
-                let public_target = alias.join("public-records");
-                let public_binding = if let Some(directory) = &public_directory {
-                    if !has_denied_children(&alias) {
-                        Some((public.clone(), public_target))
-                    } else {
-                        let names = match &public_names {
-                            Some(names) => names,
-                            None => public_names.insert(public_record_candidates(directory)?),
-                        };
-                        let selected = names
-                            .iter()
-                            .filter(|name| public_read_allowed(&public_target.join(name)))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let access = if read_allowed(&public_target) {
-                            views::ViewAccess::Readable
-                        } else {
-                            views::ViewAccess::TraverseOnly
-                        };
-                        Some((
-                            views::filtered_view(directory, &selected, access)?,
-                            public_target,
-                        ))
-                    }
-                } else {
-                    let names = public_record_candidates(&registry)?;
+                    let names = match &public_names {
+                        Some(names) => names,
+                        None => public_names.insert(public_record_candidates(directory)?),
+                    };
                     let selected = names
-                        .into_iter()
+                        .iter()
                         .filter(|name| public_read_allowed(&alias.join(name)))
+                        .cloned()
                         .collect::<Vec<_>>();
                     protection.bindings.push((
-                        views::filtered_view(&registry, &selected, views::ViewAccess::Readable)?,
+                        views::filtered_view(directory, &selected, views::ViewAccess::Readable)?,
                         alias,
                     ));
-                    continue;
-                };
-                protection.registries.push((alias, files, public_binding));
-            }
-            if let Some(directory) = &public_directory {
-                for alias in mounts.aliases(&public) {
-                    if !read_allowed(&alias)
-                        || protection
-                            .registries
-                            .iter()
-                            .any(|(root, _, _)| alias.starts_with(root))
-                    {
-                        continue;
-                    }
-                    if !has_denied_children(&alias) {
-                        protection.read_only.push(alias);
-                    } else {
-                        let names = match &public_names {
-                            Some(names) => names,
-                            None => public_names.insert(public_record_candidates(directory)?),
-                        };
-                        let selected = names
-                            .iter()
-                            .filter(|name| public_read_allowed(&alias.join(name)))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        protection.bindings.push((
-                            views::filtered_view(
-                                directory,
-                                &selected,
-                                views::ViewAccess::Readable,
-                            )?,
-                            alias,
-                        ));
-                    }
-                }
-                for (_, alias) in mounts.descendant_aliases(&public) {
-                    protection.read_only.push(alias);
                 }
             }
-            let private = path.join(OsString::from_vec(registry::INDEX.to_bytes().to_vec()));
-            let private_views = path.join(OsString::from_vec(views::VIEWS.to_bytes().to_vec()));
-            hide_private_storage(&mut protection, mounts, &private, &readable_roots)?;
-            // Older versions placed caches here. Retain those directories and
-            // apply the same private role to their aliases and explicit grants.
-            hide_private_storage(&mut protection, mounts, &private_views, &readable_roots)?;
-            for entry in std::fs::read_dir(format!("/proc/self/fd/{}", registry.as_raw_fd()))? {
-                let name = entry?.file_name();
-                if name.as_bytes().starts_with(b"stage-") {
-                    let path = path.join(name);
-                    if read_allowed(&path) {
-                        protection
-                            .hidden_files
-                            .extend(mounts.unchecked_aliases(&path));
-                    }
+            for (_, alias) in mounts.descendant_aliases(&public) {
+                protection.read_only.push(alias);
+            }
+        }
+        let private = path.join(OsString::from_vec(registry::INDEX.to_bytes().to_vec()));
+        let private_views = path.join(OsString::from_vec(views::VIEWS.to_bytes().to_vec()));
+        hide_private_storage(&mut protection, mounts, &private, &readable_roots)?;
+        // Older versions placed caches here. Retain those directories and
+        // apply the same private role to their aliases and explicit grants.
+        hide_private_storage(&mut protection, mounts, &private_views, &readable_roots)?;
+        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", registry.as_raw_fd()))? {
+            let name = entry?.file_name();
+            if name.as_bytes().starts_with(b"stage-") {
+                let path = path.join(name);
+                if read_allowed(&path) {
+                    protection
+                        .hidden_files
+                        .extend(mounts.unchecked_aliases(&path));
                 }
             }
-            // Independently bound old root records remain protected; stage paths
-            // and private-index aliases remain hidden even outside the root view.
-            for (source, alias) in mounts.descendant_aliases(&path) {
-                if source.starts_with(&public) {
-                    continue;
-                }
-                let name = source
-                    .file_name()
-                    .map(std::os::unix::ffi::OsStrExt::as_bytes)
-                    .unwrap_or_default();
-                if !source.starts_with(&private)
-                    && !source.starts_with(&private_views)
-                    && (name == b"format"
-                        || (name.len() == 64 && name.iter().all(u8::is_ascii_hexdigit)))
-                {
-                    protection.read_only.push(alias);
-                } else if alias.is_dir() {
-                    protection.hidden_directories.push(alias);
-                } else {
-                    protection.hidden_files.push(alias);
-                }
+        }
+        // Independently bound old root records remain protected; stage paths
+        // and private-index aliases remain hidden even outside the root view.
+        for (source, alias) in mounts.descendant_aliases(&path) {
+            if source.starts_with(&public) {
+                continue;
             }
-            // History is read once. Unrelated stages are filtered geometrically
-            // before performing filesystem validation or policy resolution.
-            for record in all_stages(&registry)? {
-                for alias in mounts.unchecked_aliases(&record.path) {
-                    if writable_candidate(&alias)
-                        && read_allowed(&alias)
-                        && open_directory(&alias).is_ok_and(|directory| {
-                            object_identity(&directory)
-                                .is_ok_and(|identity| identity == record.identity)
-                        })
-                    {
-                        protection.hidden_directories.push(alias);
-                    }
-                }
-                for (source, alias) in mounts.descendant_aliases(&record.path) {
-                    if !writable_candidate(&alias) || !read_allowed(&alias) {
-                        continue;
-                    }
-                    if open_directory(&record.path).is_ok_and(|directory| {
+            let name = source
+                .file_name()
+                .map(std::os::unix::ffi::OsStrExt::as_bytes)
+                .unwrap_or_default();
+            if !source.starts_with(&private)
+                && !source.starts_with(&private_views)
+                && (name == b"format"
+                    || (name.len() == 64 && name.iter().all(u8::is_ascii_hexdigit)))
+            {
+                protection.read_only.push(alias);
+            } else if alias.is_dir() {
+                protection.hidden_directories.push(alias);
+            } else {
+                protection.hidden_files.push(alias);
+            }
+        }
+        // History is read once. Unrelated stages are filtered geometrically
+        // before performing filesystem validation or policy resolution.
+        for record in all_stages(&registry)? {
+            for alias in mounts.unchecked_aliases(&record.path) {
+                if writable_candidate(&alias)
+                    && read_allowed(&alias)
+                    && open_directory(&alias).is_ok_and(|directory| {
                         object_identity(&directory)
                             .is_ok_and(|identity| identity == record.identity)
-                    }) && let Ok(expected) = std::fs::metadata(source)
-                        && let Ok(actual) = std::fs::metadata(&alias)
-                        && (expected.dev(), expected.ino()) == (actual.dev(), actual.ino())
-                    {
-                        if actual.is_dir() {
-                            protection.hidden_directories.push(alias);
-                        } else {
-                            protection.hidden_files.push(alias);
-                        }
+                    })
+                {
+                    protection.hidden_directories.push(alias);
+                }
+            }
+            for (source, alias) in mounts.descendant_aliases(&record.path) {
+                if !writable_candidate(&alias) || !read_allowed(&alias) {
+                    continue;
+                }
+                if open_directory(&record.path).is_ok_and(|directory| {
+                    object_identity(&directory).is_ok_and(|identity| identity == record.identity)
+                }) && let Ok(expected) = std::fs::metadata(source)
+                    && let Ok(actual) = std::fs::metadata(&alias)
+                    && (expected.dev(), expected.ino()) == (actual.dev(), actual.ino())
+                {
+                    if actual.is_dir() {
+                        protection.hidden_directories.push(alias);
+                    } else {
+                        protection.hidden_files.push(alias);
                     }
+                }
+            }
+        }
+    }
+    match std::fs::symlink_metadata(authorities.configuration_path()) {
+        Ok(_) => {
+            for alias in mounts.protected_aliases(authorities.configuration_path())? {
+                if read_allowed(&alias) {
+                    protection.read_only.push(alias);
                 }
             }
         }

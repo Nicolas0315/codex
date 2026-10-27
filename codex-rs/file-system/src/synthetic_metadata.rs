@@ -16,9 +16,7 @@ use std::path::Path;
 pub fn is_synthetic_metadata_directory(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        is_protected_metadata_path(path)
-            && (publication::is_owned(path).unwrap_or(false)
-                || linux::is_owned(path).unwrap_or(false))
+        is_protected_metadata_path(path) && publication::is_owned(path).unwrap_or(false)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -42,6 +40,8 @@ pub use publication::existing_synthetic_metadata_authorities;
 #[cfg(target_os = "linux")]
 pub use publication::initialize_synthetic_metadata_registry;
 #[cfg(target_os = "linux")]
+pub use publication::initialize_synthetic_metadata_storage;
+#[cfg(target_os = "linux")]
 pub use publication::prepare_synthetic_metadata_directory;
 #[cfg(target_os = "linux")]
 pub use publication::prepare_synthetic_metadata_staging;
@@ -53,6 +53,8 @@ pub use publication::synthetic_metadata_authority_paths;
 pub use publication::synthetic_metadata_protection;
 #[cfg(target_os = "linux")]
 pub use publication::synthetic_metadata_registry_path;
+#[cfg(target_os = "linux")]
+pub use publication::validate_synthetic_metadata_writer;
 
 #[cfg(target_os = "linux")]
 #[path = "synthetic_metadata_publication.rs"]

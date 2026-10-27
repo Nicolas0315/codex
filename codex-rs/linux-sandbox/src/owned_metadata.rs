@@ -3,6 +3,7 @@
 use codex_file_system::initialize_synthetic_metadata_registry;
 use codex_file_system::synthetic_metadata_authority_paths;
 use codex_file_system::synthetic_metadata_protection;
+use codex_file_system::validate_synthetic_metadata_writer;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
@@ -14,6 +15,9 @@ pub(crate) fn validate_policy(policy: &FileSystemSandboxPolicy, policy_cwd: &Pat
     if policy.has_full_disk_write_access() {
         return Ok(());
     }
+    validate_synthetic_metadata_writer(policy, policy_cwd).map_err(|error| {
+        CodexErr::Fatal(format!("cannot protect synthetic metadata writer: {error}"))
+    })?;
     let writable_roots = policy.get_writable_roots_with_cwd(policy_cwd);
     let mut mounted_masks = policy
         .get_unreadable_roots_with_cwd(policy_cwd)

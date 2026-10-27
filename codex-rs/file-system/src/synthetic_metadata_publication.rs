@@ -20,6 +20,10 @@ use std::path::PathBuf;
 
 const TAG: &std::ffi::CStr = c"user.codex.synthetic-metadata-v2";
 
+#[path = "synthetic_metadata_configuration_protection.rs"]
+mod configuration_protection;
+#[path = "synthetic_metadata_inspection.rs"]
+mod inspection;
 #[path = "synthetic_metadata_mount_table.rs"]
 mod mounts;
 #[path = "synthetic_metadata_protection.rs"]
@@ -28,6 +32,9 @@ mod protection;
 mod registry;
 #[path = "synthetic_metadata_views.rs"]
 mod views;
+pub use configuration_protection::validate_synthetic_metadata_writer;
+pub use inspection::existing_synthetic_metadata_authorities;
+pub(super) use inspection::is_owned;
 use mounts::MountTable;
 pub use protection::SyntheticMetadataProtection;
 pub use protection::synthetic_metadata_protection;
@@ -35,6 +42,7 @@ pub use protection::synthetic_metadata_protection;
 /// Durable native authority and legacy authority paths. Ambient HOME is ignored.
 pub fn synthetic_metadata_authority_paths() -> Vec<PathBuf> {
     let mut paths = registry::paths().unwrap_or_default();
+    paths.push(registry::configuration_path());
     paths.extend(super::linux::synthetic_metadata_authority_paths());
     let Ok(mounts) = MountTable::read() else {
         return paths;
@@ -60,11 +68,45 @@ fn native_registry(initialize: bool) -> io::Result<File> {
 
 /// Initialize durable native evidence before permitting a restricted writer.
 pub fn initialize_synthetic_metadata_registry() -> io::Result<PathBuf> {
+    let authorities = registry::Authorities::load()?;
     // The legacy predicate still accepts this primary authority. Reserve it
     // before a writer can fabricate a valid-looking root and kernel records.
     super::linux::initialize_authority_if_absent(&super::linux::synthetic_metadata_registry_path())?;
-    native_registry(/*initialize*/ true)?;
-    registry::path()
+    authorities.open_write(AuthorityMode::Initialize)?;
+    authorities.active_path()
+}
+
+/// Provision dedicated native storage before its administrator publishes a
+/// per-user configuration. Run as the target effective UID with that user's
+/// restricted Codex processes stopped. The parent must already be protected
+/// native storage; the final path must be absent. Existing state, even if it
+/// resembles a valid authority, is retained and never adopted by provisioning.
+/// Keep this root for at least as long as any published metadata directory.
+pub fn initialize_synthetic_metadata_storage(path: &Path) -> io::Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "storage already exists",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let (parent, name) = registry::storage_parent(path)?;
+    let (temporary, directory) = stage_authority(&parent)?;
+    registry::initialize_public_records(&directory)?;
+    if matches!(
+        publish(&parent, &temporary, &parent, &name)?,
+        Publication::AlreadyExists
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "storage already exists",
+        ));
+    }
+    parent.sync_all()?;
+    path.canonicalize()
 }
 
 fn random_name(prefix: &str) -> io::Result<CString> {
@@ -363,49 +405,6 @@ fn all_stages(registry: &File) -> io::Result<Vec<registry::StageRecord>> {
     Ok(records)
 }
 
-/// Existing evidence and authenticated destination-local stages, for inspection.
-pub fn existing_synthetic_metadata_authorities() -> io::Result<Vec<PathBuf>> {
-    let mounts = MountTable::read()?;
-    let mut paths = super::linux::existing_synthetic_metadata_authorities()?;
-    let registry = match native_registry(/*initialize*/ false) {
-        Ok(registry) => registry,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(paths),
-        Err(error) => return Err(error),
-    };
-    paths.extend(registry::paths()?);
-    let mut aliases = Vec::new();
-    for path in paths {
-        aliases.extend(mounts.protected_aliases(&path)?);
-    }
-    for record in all_stages(&registry)? {
-        aliases.extend(protected_stage_aliases(
-            &record,
-            &mounts,
-            authenticated_aliases(&record, &mounts),
-        )?);
-    }
-    aliases.sort();
-    aliases.dedup();
-    Ok(aliases)
-}
-
-pub(super) fn is_owned(path: &Path) -> io::Result<bool> {
-    let directory = open_directory(path)?;
-    let registry = native_registry(/*initialize*/ false)?;
-    let (name, expected) = nonce_record(&directory)?;
-    let public_record = registry::records(&registry, AuthorityMode::ReadOnly)
-        .and_then(|records| open_at(&records, &name, libc::O_RDONLY, /*mode*/ 0));
-    let file = match public_record {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            open_at(&registry, &name, libc::O_RDONLY, /*mode*/ 0)?
-        }
-        Err(error) => return Err(error),
-    };
-    let recorded = read_bounded(file)?;
-    Ok(recorded == expected && is_empty(&directory)? && nonce_record(&directory)?.1 == expected)
-}
-
 /// Publish an empty directory without replacing any existing destination.
 pub fn prepare_synthetic_metadata_directory(path: &Path) -> io::Result<()> {
     prepare_directory_with_tagger(path, set_tag)
@@ -420,6 +419,14 @@ fn prepare_directory_with_tagger(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    prepare_missing_directory_with_authorities(path, tagger, &registry::Authorities::load()?)
+}
+
+fn prepare_missing_directory_with_authorities(
+    path: &Path,
+    tagger: impl FnOnce(&File) -> io::Result<()>,
+    authorities: &registry::Authorities,
+) -> io::Result<()> {
     if !super::is_protected_metadata_path(path) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -432,7 +439,7 @@ fn prepare_directory_with_tagger(
         .canonicalize()?;
     let parent = open_directory(&parent_path)?;
     let mounts = MountTable::read()?;
-    let registry = native_registry(/*initialize*/ true)?;
+    let registry = authorities.open_write(AuthorityMode::Initialize)?;
     let stage_path = staging_directory(&parent_path, &mounts, &registry)?;
     let stage = open_directory(&stage_path)?;
     if mount_id(&parent)? != mount_id(&stage)? {

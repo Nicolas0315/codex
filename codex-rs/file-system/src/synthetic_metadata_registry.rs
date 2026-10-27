@@ -1,7 +1,14 @@
 //! Native, durable ownership records and the private staging index.
 
+#[path = "synthetic_metadata_authorities.rs"]
+mod authorities;
+#[path = "synthetic_metadata_storage.rs"]
+mod storage;
+pub(super) use authorities::Authorities;
+
 use super::super::linux::*;
 use std::ffi::CStr;
+use std::ffi::CString;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
@@ -40,24 +47,15 @@ fn nss_home() -> io::Result<PathBuf> {
 }
 
 pub(super) fn paths() -> io::Result<Vec<PathBuf>> {
-    let logical = nss_home()?.join(".codex").join("synthetic-metadata-v2");
-    let parent = logical
-        .parent()
-        .ok_or_else(|| invalid("registry has no parent"))?;
-    let resolved = parent
-        .canonicalize()
-        .map(|parent| parent.join("synthetic-metadata-v2"));
-    match resolved {
-        Ok(resolved) => Ok(vec![logical, resolved]),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(vec![logical]),
-        Err(error) => Err(error),
-    }
+    Authorities::load()?.paths()
 }
 
 pub(super) fn path() -> io::Result<PathBuf> {
-    paths()?
-        .pop()
-        .ok_or_else(|| invalid("registry path missing"))
+    Authorities::load()?.active_path()
+}
+
+pub(super) fn configuration_path() -> PathBuf {
+    storage::configuration_path()
 }
 
 fn validate_native_chain(path: &Path) -> io::Result<()> {
@@ -116,7 +114,31 @@ pub(super) fn authority(parent: &File, name: &CStr, mode: AuthorityMode) -> io::
 }
 
 pub(super) fn open(mode: AuthorityMode) -> io::Result<File> {
-    open_home(&nss_home()?, mode)
+    Authorities::load()?.open_write(mode)
+}
+
+pub(super) fn storage_parent(path: &Path) -> io::Result<(File, CString)> {
+    if !path.is_absolute() {
+        return Err(invalid("registry path is not absolute"));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("registry has no parent"))?
+        .canonicalize()?;
+    validate_native_chain(&parent)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("registry has no name"))?;
+    Ok((open_directory(&parent)?, c_path(Path::new(name))?))
+}
+
+pub(super) fn open_path(path: &Path, mode: AuthorityMode) -> io::Result<File> {
+    let (parent, name) = storage_parent(path)?;
+    let registry = authority(&parent, &name, mode)?;
+    if matches!(mode, AuthorityMode::Initialize) {
+        initialize_public_records(&registry)?;
+    }
+    Ok(registry)
 }
 
 fn open_home(home: &Path, mode: AuthorityMode) -> io::Result<File> {
@@ -268,7 +290,7 @@ pub(super) fn ownership_record(directory: &File, name: &CStr) -> io::Result<Opti
     Ok(Some(bytes))
 }
 
-fn initialize_public_records(registry: &File) -> io::Result<()> {
+pub(super) fn initialize_public_records(registry: &File) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let public = records(registry, AuthorityMode::Initialize)?;
     match open_at(

@@ -78,7 +78,7 @@ impl MountTable {
         Self::parse(&std::fs::read("/proc/self/mountinfo")?)
     }
 
-    fn parse(table: &[u8]) -> io::Result<Self> {
+    pub(super) fn parse(table: &[u8]) -> io::Result<Self> {
         let mounts = table
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
