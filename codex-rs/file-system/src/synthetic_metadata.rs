@@ -184,7 +184,9 @@ mod linux {
         {
             return Err(invalid("untrusted synthetic metadata record"));
         }
-        let mut bytes = Vec::new();
+        // Take<File> has no size hint. Reserve the validated length plus an EOF
+        // probe instead of reading small records through repeated buffer growth.
+        let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
         file.take(MAX_RECORD + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_RECORD {
             return Err(invalid("oversized synthetic metadata record"));

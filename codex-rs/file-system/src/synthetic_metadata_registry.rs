@@ -373,7 +373,9 @@ pub(super) fn stage_record(parent: &File, name: &CStr) -> io::Result<Option<Stag
     {
         return Err(invalid("untrusted staging record"));
     }
-    let mut bytes = Vec::new();
+    // The validated bound keeps this allocation small; leave room for an EOF
+    // probe so Take<File> need not grow its buffer while reading each record.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
     file.take(MAX_STAGE_RECORD + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_STAGE_RECORD {
         return Err(invalid("oversized staging record"));
