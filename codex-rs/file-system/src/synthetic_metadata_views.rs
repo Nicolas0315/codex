@@ -1,6 +1,7 @@
 //! Rebuildable private caches of policy-filtered, path-free ownership evidence.
 
 use super::super::linux::*;
+use super::MountTable;
 use super::registry;
 use sha2::Digest;
 use sha2::Sha256;
@@ -13,6 +14,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -21,7 +23,53 @@ pub(super) enum ViewAccess {
     TraverseOnly,
 }
 
-const VIEWS: &CStr = c"private-public-views";
+pub(super) const VIEWS: &CStr = c"private-public-views";
+
+/// Reserve an observable cache authority before admitting a reader. On a host
+/// parent whose native aliases cannot be written, future creation requires a
+/// trusted host configuration change; validating existing state needs no writes.
+pub(super) fn prepare_cache_authority(path: &Path, mounts: &MountTable) -> io::Result<()> {
+    match open_authority(path, AuthorityMode::ReadOnly) {
+        Ok(_) => return Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
+        Err(error) => return Err(error),
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("cache authority has no parent"))?;
+    if can_write_storage(parent, mounts)? {
+        // A writable alias can create future caches even if the canonical
+        // mount is read-only. Reserve through the fixed path or fail closed.
+        initialize_authority_if_absent(path)?;
+    }
+    Ok(())
+}
+
+/// Check effective host access through every validated native mount spelling.
+pub(super) fn can_write_storage(path: &Path, mounts: &MountTable) -> io::Result<bool> {
+    for alias in mounts.aliases(path) {
+        if !mounts.writable(&alias) {
+            continue;
+        }
+        let alias = c_path(&alias)?;
+        if unsafe { libc::faccessat(libc::AT_FDCWD, alias.as_ptr(), libc::W_OK, libc::AT_EACCESS) }
+            == 0
+        {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+        ) {
+            return Err(error);
+        }
+    }
+    Ok(false)
+}
 
 fn data_directory(view: &File) -> io::Result<File> {
     let data = open_at(
@@ -66,7 +114,11 @@ pub(super) fn filtered_view(
     names: &[OsString],
     access: ViewAccess,
 ) -> io::Result<PathBuf> {
-    let registry = registry::open(AuthorityMode::Initialize)?;
+    // Rebuildable projections must not require writes to the NSS home. Reuse
+    // the fixed authority whose native parent and existing state are validated
+    // by the legacy opener; it remains separate from ownership evidence.
+    let registry_path = super::super::linux::synthetic_metadata_registry_path();
+    let registry = initialize_authority_if_absent(&registry_path)?;
     let views = registry::authority(&registry, VIEWS, AuthorityMode::Initialize)?;
     let mut records = Vec::new();
     for name in names {
@@ -101,7 +153,7 @@ pub(super) fn filtered_view(
         && let Ok(view) = registry::authority(&views, &key, AuthorityMode::ReadOnly)
         && matches_records(&view, &records).unwrap_or(false)
     {
-        return Ok(registry::path()?
+        return Ok(registry_path
             .join(OsString::from_vec(VIEWS.to_bytes().to_vec()))
             .join(OsString::from_vec(key.as_bytes().to_vec()))
             .join("records"));
@@ -176,7 +228,7 @@ pub(super) fn filtered_view(
         }
     };
     views.sync_all()?;
-    Ok(registry::path()?
+    Ok(registry_path
         .join(OsString::from_vec(VIEWS.to_bytes().to_vec()))
         .join(OsString::from_vec(name.as_bytes().to_vec()))
         .join("records"))

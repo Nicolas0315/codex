@@ -464,7 +464,22 @@ fn workspace_globs_keep_constant_native_proof_bindings() {
         public,
         &Some((native.join("public-records"), native.join("public-records")))
     );
-    assert!(protection.bindings.is_empty());
+    let mounts = MountTable::read().unwrap();
+    let legacy = super::super::linux::synthetic_metadata_authority_paths()
+        .iter()
+        .flat_map(|path| mounts.aliases(path))
+        .collect::<Vec<_>>();
+    let unexpected = protection
+        .bindings
+        .iter()
+        .filter(|(_, target)| !legacy.contains(target))
+        .map(|(_, target)| target.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unexpected,
+        Vec::<PathBuf>::new(),
+        "only validated mount aliases of fixed legacy authorities should be projected"
+    );
 }
 
 #[test]
@@ -572,6 +587,145 @@ fn corrupted_filtered_cache_is_retained_and_rebuilt_as_nonauthoritative_data() {
         fs::read(rebuilt.join(OsString::from_vec(key.as_bytes().to_vec()))).unwrap(),
         bytes
     );
+}
+
+#[test]
+fn filtered_view_copies_read_only_source_without_using_nss_home_for_cache_storage() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixture(Path::new("/var/tmp"));
+    let (name, source) = stage_authority(&File::open(&root).unwrap()).unwrap();
+    let source_path = root.join(OsString::from_vec(name.as_bytes().to_vec()));
+    fs::set_permissions(&source_path, fs::Permissions::from_mode(0o500)).unwrap();
+    let before = fs::metadata(&source_path).unwrap();
+    let view = views::filtered_view(
+        &source,
+        &[OsString::from("format")],
+        views::ViewAccess::Readable,
+    )
+    .unwrap();
+    let expected = Path::new("/var/tmp")
+        .join(format!("codex-synthetic-metadata-v1-{}", unsafe {
+            libc::geteuid()
+        }))
+        .join("private-public-views");
+    assert!(view.starts_with(expected));
+    assert_eq!(
+        fs::read(view.join("format")).unwrap(),
+        b"codex-synthetic-metadata-v1\n"
+    );
+    let after = fs::metadata(&source_path).unwrap();
+    assert_eq!(
+        (
+            before.dev(),
+            before.ino(),
+            before.mode(),
+            before.mtime(),
+            before.mtime_nsec()
+        ),
+        (
+            after.dev(),
+            after.ino(),
+            after.mode(),
+            after.mtime(),
+            after.mtime_nsec()
+        )
+    );
+    assert_eq!(fs::read_dir(source_path).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_authority_projection_excludes_private_entries_created_before_and_after_selection() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    let path = super::super::linux::synthetic_metadata_registry_path();
+    let authority = initialize_authority_if_absent(&path).unwrap();
+    let before = random_name("private-before-selection").unwrap();
+    write_record(&authority, &before, b"preserve private sentinel").unwrap();
+    let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path("/").unwrap(),
+        },
+        access: FileSystemAccessMode::Read,
+    }]);
+    let protection = synthetic_metadata_protection(&policy, Path::new("/var/tmp")).unwrap();
+    assert!(!protection.read_only.contains(&path));
+    let (view, _) = protection
+        .bindings
+        .iter()
+        .find(|(_, target)| target == &path)
+        .unwrap();
+    let later = random_name("private-after-selection").unwrap();
+    write_record(&authority, &later, b"preserve later private sentinel").unwrap();
+    for name in [before, later] {
+        let name = OsString::from_vec(name.as_bytes().to_vec());
+        assert!(!view.join(&name).exists());
+        assert!(path.join(name).is_file());
+    }
+    assert_eq!(
+        fs::read(view.join("format")).unwrap(),
+        b"codex-synthetic-metadata-v1\n"
+    );
+}
+
+#[test]
+fn explicit_cached_proof_file_grants_below_denied_authorities_remain_private() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    let legacy_path = super::super::linux::synthetic_metadata_registry_path();
+    let legacy = initialize_authority_if_absent(&legacy_path).unwrap();
+    let native_path = registry::path().unwrap();
+    let native = native_registry(/*initialize*/ true).unwrap();
+    let mut files = Vec::new();
+    for (path, authority) in [(&legacy_path, &legacy), (&native_path, &native)] {
+        let cache = registry::authority(
+            authority,
+            c"private-public-views",
+            AuthorityMode::Initialize,
+        )
+        .unwrap();
+        let (name, view) = stage_authority(&cache).unwrap();
+        write_record(
+            &view,
+            c"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            b"private cached proof",
+        )
+        .unwrap();
+        files.push(
+            path.join("private-public-views")
+                .join(OsString::from_vec(name.as_bytes().to_vec()))
+                .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        );
+    }
+    let entry = |path: &Path, access| FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: AbsolutePathBuf::from_absolute_path(path).unwrap(),
+        },
+        access,
+    };
+    let mut entries = vec![
+        entry(Path::new("/"), FileSystemAccessMode::Read),
+        entry(&legacy_path, FileSystemAccessMode::Deny),
+        entry(&native_path, FileSystemAccessMode::Deny),
+    ];
+    entries.extend(
+        files
+            .iter()
+            .map(|path| entry(path, FileSystemAccessMode::Read)),
+    );
+    let protection = synthetic_metadata_protection(
+        &FileSystemSandboxPolicy::restricted(entries),
+        Path::new("/var/tmp"),
+    )
+    .unwrap();
+    for path in files {
+        assert!(protection.hidden_files.contains(&path));
+        assert!(!protection.read_only.contains(&path));
+        assert_eq!(fs::read(path).unwrap(), b"private cached proof");
+    }
 }
 
 #[test]

@@ -10,6 +10,7 @@ use super::views;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::ReadDenyMatcher;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::ffi::CString;
 use std::ffi::OsString;
 use std::fs::File;
@@ -30,6 +31,40 @@ pub struct SyntheticMetadataProtection {
     pub registries: Vec<RegistryProjection>,
     pub hidden_directories: Vec<PathBuf>,
     pub hidden_files: Vec<PathBuf>,
+}
+
+/// Hide private storage and its existing mount aliases without walking cache
+/// contents. Exact grants can be mounted later below a denied private parent.
+fn hide_private_storage(
+    protection: &mut SyntheticMetadataProtection,
+    mounts: &MountTable,
+    path: &Path,
+    readable_roots: &[AbsolutePathBuf],
+) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(invalid("private ownership storage is not a directory")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let aliases = mounts.protected_aliases(path)?;
+    let mut hidden = aliases.clone();
+    hidden.extend(
+        readable_roots
+            .iter()
+            .map(AbsolutePathBuf::as_path)
+            .filter(|grant| aliases.iter().any(|alias| grant.starts_with(alias)))
+            .map(Path::to_path_buf),
+    );
+    for path in hidden {
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => protection.hidden_directories.push(path),
+            Ok(_) => protection.hidden_files.push(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn public_record_names(directory: &File) -> io::Result<Vec<OsString>> {
@@ -109,7 +144,14 @@ pub fn synthetic_metadata_protection(
     policy: &FileSystemSandboxPolicy,
     cwd: &Path,
 ) -> io::Result<SyntheticMetadataProtection> {
-    let mounts = MountTable::read()?;
+    protection_with_mounts(policy, cwd, &MountTable::read()?)
+}
+
+pub(super) fn protection_with_mounts(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    mounts: &MountTable,
+) -> io::Result<SyntheticMetadataProtection> {
     let mut protection = SyntheticMetadataProtection {
         read_only: Vec::new(),
         bindings: Vec::new(),
@@ -118,6 +160,7 @@ pub fn synthetic_metadata_protection(
         hidden_files: Vec::new(),
     };
     let writable_roots = policy.get_writable_roots_with_cwd(cwd);
+    let readable_roots = policy.get_readable_roots_with_cwd(cwd);
     let denied = policy.get_unreadable_roots_with_cwd(cwd);
     let glob_roots = policy
         .get_unreadable_globs_with_cwd(cwd)
@@ -136,13 +179,25 @@ pub fn synthetic_metadata_protection(
                 .as_ref()
                 .is_some_and(|matcher| matcher.is_read_denied(path))
     };
-    let has_denied_children = |path: &Path| {
+    let public_read_allowed = |path: &Path| {
+        read_allowed(path)
+            && path
+                .canonicalize()
+                .is_ok_and(|resolved| resolved.as_path() == path || read_allowed(&resolved))
+    };
+    let intersects_denied_children = |path: &Path| {
         glob_roots
             .iter()
             .any(|root| root.starts_with(path) || path.starts_with(root))
             || denied
                 .iter()
                 .any(|denied| denied.as_path().starts_with(path))
+    };
+    let has_denied_children = |path: &Path| {
+        intersects_denied_children(path)
+            || path
+                .canonicalize()
+                .map_or(true, |path| intersects_denied_children(&path))
     };
     let writable_candidate = |path: &Path| {
         mounts.writable(path)
@@ -160,37 +215,16 @@ pub fn synthetic_metadata_protection(
                     .iter()
                     .any(|root| root.root.as_path().starts_with(path)))
     };
-    for authority in super::super::linux::existing_synthetic_metadata_authorities()? {
-        let mut records = None;
-        for alias in mounts.aliases(&authority) {
-            if !read_allowed(&alias) {
-                continue;
-            }
-            if !has_denied_children(&alias) {
-                protection.read_only.push(alias);
-                continue;
-            }
-            let names = match &records {
-                Some(names) => names,
-                None => records.insert(public_record_names(&open_directory(&authority)?)?),
-            };
-            let selected = names
+    let primary = super::super::linux::synthetic_metadata_registry_path();
+    if mounts.unchecked_aliases(&primary).iter().any(|alias| {
+        read_allowed(alias)
+            || readable_roots
                 .iter()
-                .filter(|name| read_allowed(&alias.join(name)))
-                .cloned()
-                .collect::<Vec<_>>();
-            let source = views::filtered_view(
-                &open_directory(&authority)?,
-                &selected,
-                views::ViewAccess::Readable,
-            )?;
-            protection.bindings.push((source, alias));
-        }
-        for (_, alias) in mounts.descendant_aliases(&authority) {
-            if read_allowed(&alias) {
-                protection.read_only.push(alias);
-            }
-        }
+                .any(|root| root.as_path().starts_with(alias) && read_allowed(root.as_path()))
+    }) {
+        // A reader must not see private caches created by a later launcher
+        // through an authority root that was absent during this preparation.
+        views::prepare_cache_authority(&primary, mounts)?;
     }
     match native_registry(/*initialize*/ false) {
         Ok(registry) => {
@@ -207,7 +241,7 @@ pub fn synthetic_metadata_protection(
                     continue;
                 }
                 let format = alias.join("format");
-                let files = if read_allowed(&format) {
+                let files = if public_read_allowed(&format) {
                     vec![format]
                 } else {
                     Vec::new()
@@ -223,7 +257,7 @@ pub fn synthetic_metadata_protection(
                         };
                         let selected = names
                             .iter()
-                            .filter(|name| read_allowed(&public_target.join(name)))
+                            .filter(|name| public_read_allowed(&public_target.join(name)))
                             .cloned()
                             .collect::<Vec<_>>();
                         let access = if read_allowed(&public_target) {
@@ -240,7 +274,7 @@ pub fn synthetic_metadata_protection(
                     let names = public_record_names(&registry)?;
                     let selected = names
                         .into_iter()
-                        .filter(|name| read_allowed(&alias.join(name)))
+                        .filter(|name| public_read_allowed(&alias.join(name)))
                         .collect::<Vec<_>>();
                     protection.bindings.push((
                         views::filtered_view(&registry, &selected, views::ViewAccess::Readable)?,
@@ -269,7 +303,7 @@ pub fn synthetic_metadata_protection(
                         };
                         let selected = names
                             .iter()
-                            .filter(|name| read_allowed(&alias.join(name)))
+                            .filter(|name| public_read_allowed(&alias.join(name)))
                             .cloned()
                             .collect::<Vec<_>>();
                         protection.bindings.push((
@@ -287,28 +321,11 @@ pub fn synthetic_metadata_protection(
                 }
             }
             let private = path.join(OsString::from_vec(registry::INDEX.to_bytes().to_vec()));
-            if private.is_dir() {
-                for alias in mounts.protected_aliases(&private)? {
-                    if alias.is_dir() {
-                        protection.hidden_directories.push(alias);
-                    } else {
-                        protection.hidden_files.push(alias);
-                    }
-                }
-            }
-            // Explicit readable file grants can be mounted below a denied
-            // parent later by bwrap; they do not exist in this host mount table.
-            // Mask those path records individually as well as existing aliases.
-            if private.is_dir() {
-                for entry in std::fs::read_dir(&private)? {
-                    let path = entry?.path();
-                    if read_allowed(&path) {
-                        protection
-                            .hidden_files
-                            .extend(mounts.unchecked_aliases(&path));
-                    }
-                }
-            }
+            let private_views = path.join(OsString::from_vec(views::VIEWS.to_bytes().to_vec()));
+            hide_private_storage(&mut protection, mounts, &private, &readable_roots)?;
+            // Older versions placed caches here. Retain those directories and
+            // apply the same private role to their aliases and explicit grants.
+            hide_private_storage(&mut protection, mounts, &private_views, &readable_roots)?;
             for entry in std::fs::read_dir(format!("/proc/self/fd/{}", registry.as_raw_fd()))? {
                 let name = entry?.file_name();
                 if name.as_bytes().starts_with(b"stage-") {
@@ -331,6 +348,7 @@ pub fn synthetic_metadata_protection(
                     .map(std::os::unix::ffi::OsStrExt::as_bytes)
                     .unwrap_or_default();
                 if !source.starts_with(&private)
+                    && !source.starts_with(&private_views)
                     && (name == b"format"
                         || (name.len() == 64 && name.iter().all(u8::is_ascii_hexdigit)))
                 {
@@ -378,6 +396,64 @@ pub fn synthetic_metadata_protection(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    // NSS filtering may just have created the fixed cache authority. Include
+    // that root as well as older fixed authorities before the child starts.
+    for authority in super::super::linux::existing_synthetic_metadata_authorities()? {
+        let private_views = authority.join(OsString::from_vec(views::VIEWS.to_bytes().to_vec()));
+        let writable_storage = views::can_write_storage(&authority, mounts)?;
+        let mut records = None;
+        let mut all_public_view = None;
+        for alias in mounts.aliases(&authority) {
+            if !read_allowed(&alias) {
+                continue;
+            }
+            let intersects_denies = has_denied_children(&alias);
+            if !intersects_denies && !writable_storage {
+                // No alias can create later private entries under stable host
+                // configuration. Existing private caches are still masked below.
+                protection.read_only.push(alias);
+                continue;
+            }
+            let names = match &records {
+                Some(names) => names,
+                None => records.insert(public_record_names(&open_directory(&authority)?)?),
+            };
+            let source = if !intersects_denies {
+                // The readable parent already grants every public child. Reuse
+                // one snapshot rather than revalidating the same set per alias.
+                match &all_public_view {
+                    Some(view) => PathBuf::clone(view),
+                    None => {
+                        let view = views::filtered_view(
+                            &open_directory(&authority)?,
+                            names,
+                            views::ViewAccess::Readable,
+                        )?;
+                        all_public_view = Some(view.clone());
+                        view
+                    }
+                }
+            } else {
+                let selected = names
+                    .iter()
+                    .filter(|name| public_read_allowed(&alias.join(name)))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                views::filtered_view(
+                    &open_directory(&authority)?,
+                    &selected,
+                    views::ViewAccess::Readable,
+                )?
+            };
+            protection.bindings.push((source, alias));
+        }
+        for (source, alias) in mounts.descendant_aliases(&authority) {
+            if !source.starts_with(&private_views) && read_allowed(&alias) {
+                protection.read_only.push(alias);
+            }
+        }
+        hide_private_storage(&mut protection, mounts, &private_views, &readable_roots)?;
+    }
     protection.registries.sort();
     protection.registries.dedup();
     protection.bindings.retain(|(_, target)| {
@@ -400,6 +476,10 @@ pub fn synthetic_metadata_protection(
                     .registries
                     .iter()
                     .any(|(registry, _, _)| path.starts_with(registry))
+                && !protection
+                    .bindings
+                    .iter()
+                    .any(|(_, target)| path.starts_with(target))
         });
         paths.sort();
         paths.dedup();
