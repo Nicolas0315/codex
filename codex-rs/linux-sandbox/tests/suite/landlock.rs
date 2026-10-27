@@ -5,6 +5,8 @@ use codex_core::exec::ExecParams;
 use codex_core::exec::process_exec_tool_call;
 use codex_core::exec_env::create_env;
 use codex_core::sandboxing::SandboxPermissions;
+use codex_file_system::is_synthetic_metadata_directory;
+use codex_git_utils::get_git_repo_root;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
@@ -47,7 +49,7 @@ fn create_env_from_core_vars() -> HashMap<String, String> {
     create_env(&policy, /*thread_id*/ None)
 }
 
-fn codex_linux_sandbox_exe() -> PathBuf {
+pub(super) fn codex_linux_sandbox_exe() -> PathBuf {
     let sandbox_program = PathBuf::from(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
     match sandbox_program.canonicalize() {
         Ok(path) => path,
@@ -673,6 +675,7 @@ async fn sandbox_keeps_parent_repo_discovery_while_blocking_child_metadata() {
         "git init should create parent repo"
     );
 
+    let expected_repo = repo.clone();
     let repo = repo.to_string_lossy();
     let script = format!(
         r#"set -e
@@ -702,6 +705,26 @@ fi
         output.stdout.text, output.stderr.text
     );
 
+    let metadata_ids = || {
+        use std::os::unix::fs::MetadataExt;
+        [".git", ".codex", ".agents"].map(|name| {
+            let path = subdir.join(name);
+            assert!(
+                is_synthetic_metadata_directory(&path),
+                "unowned metadata: {path:?}"
+            );
+            let metadata = std::fs::metadata(path).expect("owned metadata");
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+            )
+        })
+    };
+    let initial_metadata_ids = metadata_ids();
+    assert_eq!(get_git_repo_root(&subdir), Some(expected_repo.clone()));
+
     let git_init_output = expect_denied(
         run_cmd_result_with_cwd_and_writable_roots(
             &["git", "init", "-q"],
@@ -715,7 +738,7 @@ fi
         "child git init should be denied",
     );
     assert_ne!(git_init_output.exit_code, 0);
-    assert!(!subdir.join(".git").exists());
+    assert!(is_synthetic_metadata_directory(&subdir.join(".git")));
 
     let mkdir_codex_output = expect_denied(
         run_cmd_result_with_cwd_and_writable_roots(
@@ -730,7 +753,7 @@ fi
         "child .codex directory creation should be denied",
     );
     assert_ne!(mkdir_codex_output.exit_code, 0);
-    assert!(!subdir.join(".codex").exists());
+    assert!(is_synthetic_metadata_directory(&subdir.join(".codex")));
 
     let script = format!(
         r#"set -e
@@ -756,9 +779,11 @@ printf '%s\n' '{{"message":"ok"}}' | python3 jsonl_viewer.py | grep -q ok
     );
 
     assert!(subdir.join("jsonl_viewer.py").is_file());
-    assert!(!subdir.join(".git").exists());
-    assert!(!subdir.join(".codex").exists());
-    assert!(!subdir.join(".agents").exists());
+    assert!(is_synthetic_metadata_directory(&subdir.join(".git")));
+    assert!(is_synthetic_metadata_directory(&subdir.join(".codex")));
+    assert!(is_synthetic_metadata_directory(&subdir.join(".agents")));
+    assert_eq!(metadata_ids(), initial_metadata_ids);
+    assert_eq!(get_git_repo_root(&subdir), Some(expected_repo));
 }
 
 #[tokio::test]

@@ -275,7 +275,7 @@ fn managed_proxy_preflight_argv_is_wrapped_for_full_access_policy() {
 }
 
 #[test]
-fn cleanup_synthetic_mount_targets_removes_only_empty_mount_targets() {
+fn cleanup_synthetic_mount_targets_preserves_unidentified_directories() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
     let empty_file = temp_dir.path().join(".git");
     let empty_dir = temp_dir.path().join(".agents");
@@ -294,7 +294,7 @@ fn cleanup_synthetic_mount_targets_removes_only_empty_mount_targets() {
     cleanup_synthetic_mount_targets(&registrations);
 
     assert!(!empty_file.exists());
-    assert!(!empty_dir.exists());
+    assert!(empty_dir.is_dir());
     assert_eq!(
         std::fs::read_to_string(&non_empty_file).expect("read nonempty file"),
         "keep"

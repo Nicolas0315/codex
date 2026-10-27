@@ -1148,7 +1148,7 @@ async fn find_project_root(
             if fs
                 .get_metadata(&marker_path_uri, /*sandbox*/ None)
                 .await
-                .is_ok()
+                .is_ok_and(|metadata| !metadata.is_synthetic_directory)
             {
                 return Ok(ancestor);
             }
@@ -1173,7 +1173,7 @@ async fn find_git_checkout_root(
         if fs
             .get_metadata(&dot_git_uri, /*sandbox*/ None)
             .await
-            .is_ok()
+            .is_ok_and(|metadata| !metadata.is_synthetic_directory)
         {
             return Some(dir);
         }

@@ -239,14 +239,27 @@ async fn python_getpwuid_works_under_sandbox() {
     #[cfg(not(target_os = "linux"))]
     let sandbox_env = HashMap::new();
 
-    if std::process::Command::new("python3")
-        .arg("--version")
-        .status()
-        .is_err()
+    // The child runs with a cleared environment. Resolve the interpreter now
+    // so its PATH lookup cannot select a different Python installation.
+    let interpreter = match std::process::Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
     {
-        eprintln!("python3 not found in PATH, skipping test.");
-        return;
-    }
+        Ok(output) => output,
+        Err(_) => {
+            eprintln!("python3 not found in PATH, skipping test.");
+            return;
+        }
+    };
+    assert!(
+        interpreter.status.success(),
+        "python3 executable lookup failed"
+    );
+    let python_executable = String::from_utf8(interpreter.stdout)
+        .expect("Python executable path should be UTF-8")
+        .trim()
+        .to_owned();
+    assert!(std::path::Path::new(&python_executable).is_absolute());
 
     let permission_profile = PermissionProfile::read_only();
     let command_cwd = AbsolutePathBuf::current_dir().expect("should be able to get current dir");
@@ -254,7 +267,7 @@ async fn python_getpwuid_works_under_sandbox() {
 
     let mut child = spawn_command_under_sandbox(
         vec![
-            "python3".to_string(),
+            python_executable,
             "-c".to_string(),
             "import pwd, os; print(pwd.getpwuid(os.getuid()))".to_string(),
         ],
@@ -411,11 +424,23 @@ async fn sandbox_blocks_first_time_dot_codex_creation() {
     );
     let dot_codex_metadata = tokio::fs::symlink_metadata(&dot_codex).await;
     if let Ok(metadata) = dot_codex_metadata {
+        // Linux publishes an owned empty read-only source before executing the
+        // command. Its existence is distinct from the command creating data.
         assert!(
-            !metadata.is_dir(),
-            "{} should not be creatable as a directory",
+            !metadata.is_dir()
+                || codex_file_system::is_synthetic_metadata_directory(dot_codex.as_path()),
+            "{} must not be an unowned directory created by the command",
             dot_codex.display()
         );
+        if metadata.is_dir() {
+            assert_eq!(
+                std::fs::read_dir(&dot_codex)
+                    .expect("owned source remains readable")
+                    .count(),
+                0,
+                "the command must not populate protected metadata"
+            );
+        }
     } else if let Err(err) = &dot_codex_metadata {
         assert_eq!(
             err.kind(),

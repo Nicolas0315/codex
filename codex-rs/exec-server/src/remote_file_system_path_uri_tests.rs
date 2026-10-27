@@ -78,6 +78,66 @@ async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conve
     server.await.expect("recording server should succeed");
 }
 
+#[tokio::test]
+async fn remote_file_system_preserves_synthetic_metadata_from_remote_host() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let websocket_url = format!("ws://{}", listener.local_addr().expect("listener address"));
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("listener should accept");
+        let mut websocket = accept_async(stream)
+            .await
+            .expect("websocket handshake should succeed");
+        complete_websocket_initialize(&mut websocket).await;
+        let request = match read_jsonrpc_websocket(&mut websocket).await {
+            JSONRPCMessage::Request(request)
+                if request.method == crate::protocol::FS_GET_METADATA_METHOD =>
+            {
+                request
+            }
+            other => panic!("expected fs/getMetadata request, got {other:?}"),
+        };
+        write_jsonrpc_websocket(
+            &mut websocket,
+            JSONRPCMessage::Response(JSONRPCResponse {
+                id: request.id,
+                result: serde_json::json!({
+                    "isDirectory": true,
+                    "isSyntheticDirectory": true,
+                    "isFile": false,
+                    "isSymlink": false,
+                    "size": 4096,
+                    "createdAtMs": 12,
+                    "modifiedAtMs": 34,
+                }),
+            }),
+        )
+        .await;
+    });
+    let file_system = RemoteFileSystem::new(LazyRemoteExecServerClient::new(
+        ExecServerTransportParams::websocket_url(websocket_url),
+    ));
+    // A non-native path confirms the flag comes from the remote host's metadata.
+    let path = non_native_cwd().join(".git").expect("marker URI");
+    assert_eq!(
+        file_system
+            .get_metadata(&path, /*sandbox*/ None)
+            .await
+            .expect("remote metadata"),
+        FileMetadata {
+            is_directory: true,
+            is_synthetic_directory: true,
+            is_file: false,
+            is_symlink: false,
+            size: 4096,
+            created_at_ms: 12,
+            modified_at_ms: 34,
+        }
+    );
+    server.await.expect("recording server should succeed");
+}
+
 async fn record_read_file_params(
     expected_requests: usize,
 ) -> (

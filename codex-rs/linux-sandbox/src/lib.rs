@@ -18,6 +18,8 @@ mod launcher;
 #[cfg(target_os = "linux")]
 mod linux_run_main;
 #[cfg(target_os = "linux")]
+mod owned_metadata;
+#[cfg(target_os = "linux")]
 mod proxy_routing;
 
 #[cfg(target_os = "linux")]

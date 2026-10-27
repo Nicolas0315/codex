@@ -2804,6 +2804,7 @@ dependencies = [
  "codex-config",
  "codex-context-fragments",
  "codex-exec-server",
+ "codex-file-system",
  "codex-login",
  "codex-model-provider",
  "codex-otel",
@@ -2843,6 +2844,7 @@ dependencies = [
  "codex-config",
  "codex-core",
  "codex-feedback",
+ "codex-file-system",
  "codex-git-utils",
  "codex-login",
  "codex-model-provider-info",
@@ -3055,7 +3057,10 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
  "futures",
+ "libc",
  "serde",
+ "sha2 0.10.9",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]
@@ -3206,6 +3211,8 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "codex-core",
+ "codex-file-system",
+ "codex-git-utils",
  "codex-install-context",
  "codex-process-hardening",
  "codex-protocol",

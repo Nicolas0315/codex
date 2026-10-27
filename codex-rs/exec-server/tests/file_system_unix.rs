@@ -228,6 +228,7 @@ async fn file_system_get_metadata_reports_symlink_targets(
         symlink_metadata,
         FileMetadata {
             is_directory: false,
+            is_synthetic_directory: false,
             is_file: true,
             is_symlink: true,
             size: 5,
@@ -252,6 +253,7 @@ async fn file_system_get_metadata_reports_symlink_targets(
         dir_symlink_metadata,
         FileMetadata {
             is_directory: true,
+            is_synthetic_directory: false,
             is_file: false,
             is_symlink: true,
             size: std::fs::metadata(&dir_path)?.len(),

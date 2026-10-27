@@ -5,24 +5,24 @@ use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
 
 use crate::bundled_bwrap;
 use crate::bundled_bwrap::BundledBwrapLauncher;
 use crate::exec_util::argv_to_cstrings;
 use crate::exec_util::make_files_inheritable;
+use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_sandboxing::find_system_bwrap_in_path;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BubblewrapLauncher {
+pub(crate) enum BubblewrapLauncher {
     System(SystemBwrapLauncher),
     Bundled(BundledBwrapLauncher),
     Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SystemBwrapLauncher {
+pub(crate) struct SystemBwrapLauncher {
     program: AbsolutePathBuf,
     supports_argv0: bool,
 }
@@ -33,8 +33,12 @@ struct SystemBwrapCapabilities {
     supports_perms: bool,
 }
 
-pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
-    match preferred_bwrap_launcher() {
+pub(crate) fn exec_bwrap(
+    launcher: &BubblewrapLauncher,
+    argv: Vec<String>,
+    preserved_files: Vec<File>,
+) -> ! {
+    match launcher {
         BubblewrapLauncher::System(launcher) => {
             exec_system_bwrap(&launcher.program, argv, preserved_files)
         }
@@ -48,22 +52,20 @@ pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
     }
 }
 
-fn preferred_bwrap_launcher() -> BubblewrapLauncher {
-    static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
-    LAUNCHER
-        .get_or_init(|| {
-            if let Some(path) = find_system_bwrap_in_path()
-                && let Some(launcher) = system_bwrap_launcher_for_path(&path)
-            {
-                return BubblewrapLauncher::System(launcher);
-            }
+pub(crate) fn preferred_bwrap_launcher(
+    file_system_policy: &FileSystemSandboxPolicy,
+    sandbox_policy_cwd: &Path,
+) -> BubblewrapLauncher {
+    if let Some(path) = find_system_bwrap_in_path(file_system_policy, sandbox_policy_cwd)
+        && let Some(launcher) = system_bwrap_launcher_for_path(&path)
+    {
+        return BubblewrapLauncher::System(launcher);
+    }
 
-            match bundled_bwrap::launcher() {
-                Some(launcher) => BubblewrapLauncher::Bundled(launcher),
-                None => BubblewrapLauncher::Unavailable,
-            }
-        })
-        .clone()
+    match bundled_bwrap::launcher() {
+        Some(launcher) => BubblewrapLauncher::Bundled(launcher),
+        None => BubblewrapLauncher::Unavailable,
+    }
 }
 
 fn system_bwrap_launcher_for_path(system_bwrap_path: &Path) -> Option<SystemBwrapLauncher> {
@@ -98,8 +100,8 @@ fn system_bwrap_launcher_for_path_with_probe(
     })
 }
 
-pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
-    match preferred_bwrap_launcher() {
+pub(crate) fn preferred_bwrap_supports_argv0(launcher: &BubblewrapLauncher) -> bool {
+    match launcher {
         BubblewrapLauncher::System(launcher) => launcher.supports_argv0,
         BubblewrapLauncher::Bundled(_) | BubblewrapLauncher::Unavailable => true,
     }

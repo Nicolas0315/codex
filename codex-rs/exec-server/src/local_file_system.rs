@@ -579,6 +579,9 @@ impl DirectFileSystem {
         let symlink_metadata = tokio::fs::symlink_metadata(path.as_path()).await?;
         Ok(FileMetadata {
             is_directory: metadata.is_dir(),
+            is_synthetic_directory: codex_file_system::is_synthetic_metadata_directory(
+                path.as_path(),
+            ),
             is_file: metadata.is_file(),
             is_symlink: symlink_metadata.file_type().is_symlink(),
             size: metadata.len(),

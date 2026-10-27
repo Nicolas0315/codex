@@ -71,6 +71,7 @@ impl FileSystemSandboxRunner {
                 invalid_request(format!("invalid sandbox permission path URI: {err}"))
             })?;
         let mut file_system_policy = native_permissions.file_system_sandbox_policy();
+        let original_file_system_policy = file_system_policy.clone();
         let helper_read_roots = if sandbox.use_legacy_landlock {
             Vec::new()
         } else {
@@ -90,7 +91,15 @@ impl FileSystemSandboxRunner {
         );
         let command = self.sandbox_exec_request(&permission_profile, &cwd.uri, sandbox)?;
         let request_json = serde_json::to_vec(&request).map_err(json_error)?;
-        run_command(command, request_json).await
+        let mut payload = run_command(command, request_json).await?;
+        crate::fs_metadata_ownership::augment_metadata_ownership(
+            &original_file_system_policy,
+            cwd.native.as_path(),
+            &request,
+            &mut payload,
+        )
+        .map_err(io_error)?;
+        Ok(payload)
     }
 
     fn sandbox_exec_request(

@@ -231,6 +231,7 @@ pub(crate) async fn run_direct_request(
                 .map_err(map_fs_error)?;
             Ok(FsHelperPayload::GetMetadata(FsGetMetadataResponse {
                 is_directory: metadata.is_directory,
+                is_synthetic_directory: metadata.is_synthetic_directory,
                 is_file: metadata.is_file,
                 is_symlink: metadata.is_symlink,
                 size: metadata.size,

@@ -1,8 +1,10 @@
 use crate::policy_transforms::should_require_platform_sandbox;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::FileSystemSandboxPolicy;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -37,12 +39,16 @@ const SYSTEM_BWRAP_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const SYSTEM_BWRAP_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SYSTEM_BWRAP_PROBE_STDERR_LIMIT_BYTES: u64 = 64 * 1024;
 
-pub fn system_bwrap_warning(permission_profile: &PermissionProfile) -> Option<String> {
+pub fn system_bwrap_warning(
+    permission_profile: &PermissionProfile,
+    sandbox_policy_cwd: &Path,
+) -> Option<String> {
     if !should_warn_about_system_bwrap(permission_profile) {
         return None;
     }
 
-    let system_bwrap_path = find_system_bwrap_in_path();
+    let (file_system_policy, _) = permission_profile.to_runtime_permissions();
+    let system_bwrap_path = find_system_bwrap_in_path(&file_system_policy, sandbox_policy_cwd);
     system_bwrap_warning_for_path(system_bwrap_path.as_deref())
 }
 
@@ -165,27 +171,65 @@ fn is_user_namespace_failure(output: &Output) -> bool {
         .any(|failure| stderr.contains(failure))
 }
 
-pub fn find_system_bwrap_in_path() -> Option<PathBuf> {
+pub fn find_system_bwrap_in_path(
+    file_system_policy: &FileSystemSandboxPolicy,
+    sandbox_policy_cwd: &Path,
+) -> Option<PathBuf> {
     let search_path = std::env::var_os("PATH")?;
-    let cwd = std::env::current_dir().ok()?;
-    find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), &cwd)
+    find_system_bwrap_in_search_paths(
+        std::env::split_paths(&search_path),
+        file_system_policy,
+        sandbox_policy_cwd,
+    )
 }
 
 fn find_system_bwrap_in_search_paths(
     search_paths: impl IntoIterator<Item = PathBuf>,
-    cwd: &Path,
+    file_system_policy: &FileSystemSandboxPolicy,
+    sandbox_policy_cwd: &Path,
 ) -> Option<PathBuf> {
     let search_path = std::env::join_paths(search_paths).ok()?;
-    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let cwd_is_root = cwd.parent().is_none();
-    which::which_in_all(SYSTEM_BWRAP_PROGRAM, Some(search_path), &cwd)
+    let workspace = std::fs::canonicalize(sandbox_policy_cwd).ok()?;
+    let unrestricted = file_system_policy.has_full_disk_write_access();
+    let writable_roots: Vec<PathBuf> = file_system_policy
+        .get_writable_roots_with_cwd(sandbox_policy_cwd)
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root.root.as_path()).ok())
+        .collect();
+    // The command's working directory is tool-controlled. Only the trusted
+    // policy context can decide whether an executable is outside agent control.
+    // Check parents too: a read-only executable can be replaced through a
+    // writable directory, and a write root can use a different symlink alias.
+    let is_untrusted = |path: &Path| {
+        path.ancestors().any(|ancestor| {
+            ancestor.starts_with(&workspace)
+                || ancestor.starts_with(sandbox_policy_cwd)
+                || (!unrestricted
+                    && file_system_policy.can_write_path_with_cwd(ancestor, sandbox_policy_cwd))
+                || writable_roots.iter().any(|root| ancestor.starts_with(root))
+        })
+    };
+    which::which_in_all(SYSTEM_BWRAP_PROGRAM, Some(search_path), sandbox_policy_cwd)
         .ok()?
         .find_map(|path| {
-            let path = std::fs::canonicalize(path).ok()?;
-            if !cwd_is_root && path.starts_with(&cwd) {
+            let canonical_path = std::fs::canonicalize(&path).ok()?;
+            // Network-only sandboxes can allow all filesystem writes. In that
+            // mode only an OS-protected installation is outside agent control;
+            // root cannot rely on Unix ownership and must use the bundled helper.
+            if unrestricted
+                && (unsafe { libc::geteuid() } == 0
+                    || !canonical_path.ancestors().all(|ancestor| {
+                        std::fs::metadata(ancestor).is_ok_and(|metadata| {
+                            metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+                        })
+                    }))
+            {
+                return None;
+            }
+            if is_untrusted(&path) || is_untrusted(&canonical_path) {
                 None
             } else {
-                Some(path)
+                Some(canonical_path)
             }
         })
 }

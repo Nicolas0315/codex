@@ -21,7 +21,9 @@ use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
+use crate::launcher::BubblewrapLauncher;
 use crate::launcher::exec_bwrap;
+use crate::launcher::preferred_bwrap_launcher;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
@@ -323,12 +325,16 @@ fn run_bwrap_with_proc_fallback(
     mount_proc: bool,
     allow_network_for_proxy: bool,
 ) -> ! {
+    crate::owned_metadata::validate_policy(file_system_sandbox_policy, sandbox_policy_cwd)
+        .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    let launcher = preferred_bwrap_launcher(file_system_sandbox_policy, sandbox_policy_cwd);
     let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
 
     if mount_proc
         && !preflight_proc_mount_support(
+            &launcher,
             sandbox_policy_cwd,
             command_cwd,
             file_system_sandbox_policy,
@@ -354,8 +360,14 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
-    apply_inner_command_argv0(&mut bwrap_args.args);
-    run_or_exec_bwrap(bwrap_args);
+    crate::owned_metadata::protect_arguments(
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+        &mut bwrap_args.args,
+    )
+    .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    apply_inner_command_argv0(&launcher, &mut bwrap_args.args);
+    run_or_exec_bwrap(&launcher, bwrap_args);
 }
 
 fn bwrap_network_mode(
@@ -401,10 +413,10 @@ fn exit_with_bwrap_build_error(err: codex_protocol::error::CodexErr) -> ! {
     std::process::exit(1);
 }
 
-fn apply_inner_command_argv0(argv: &mut Vec<String>) {
+fn apply_inner_command_argv0(launcher: &BubblewrapLauncher, argv: &mut Vec<String>) {
     apply_inner_command_argv0_for_launcher(
         argv,
-        preferred_bwrap_supports_argv0(),
+        preferred_bwrap_supports_argv0(launcher),
         current_process_argv0(),
     );
 }
@@ -442,6 +454,7 @@ fn current_process_argv0() -> String {
 }
 
 fn preflight_proc_mount_support(
+    launcher: &BubblewrapLauncher,
     sandbox_policy_cwd: &Path,
     command_cwd: &Path,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
@@ -453,7 +466,12 @@ fn preflight_proc_mount_support(
         file_system_sandbox_policy,
         network_mode,
     )?;
-    let stderr = run_bwrap_in_child_capture_stderr(preflight_argv);
+    let stderr = run_bwrap_in_child_capture_stderr(
+        launcher,
+        preflight_argv,
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+    );
     Ok(!is_proc_mount_failure(stderr.as_str()))
 }
 
@@ -486,16 +504,19 @@ fn resolve_true_command() -> String {
     "true".to_string()
 }
 
-fn run_or_exec_bwrap(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
+fn run_or_exec_bwrap(launcher: &BubblewrapLauncher, bwrap_args: crate::bwrap::BwrapArgs) -> ! {
     if bwrap_args.synthetic_mount_targets.is_empty()
         && bwrap_args.protected_create_targets.is_empty()
     {
-        exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
+        exec_bwrap(launcher, bwrap_args.args, bwrap_args.preserved_files);
     }
-    run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args);
+    run_bwrap_in_child_with_synthetic_mount_cleanup(launcher, bwrap_args);
 }
 
-fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
+fn run_bwrap_in_child_with_synthetic_mount_cleanup(
+    launcher: &BubblewrapLauncher,
+    bwrap_args: crate::bwrap::BwrapArgs,
+) -> ! {
     let crate::bwrap::BwrapArgs {
         args,
         preserved_files,
@@ -524,7 +545,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         }
         terminate_with_parent(parent_pid);
         wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
-        exec_bwrap(args, preserved_files);
+        exec_bwrap(launcher, args, preserved_files);
     }
 
     close_child_exec_start_read(exec_start_pipe[0]);
@@ -1296,7 +1317,18 @@ fn exit_with_wait_status_or_policy_violation(
 /// - We capture stderr from that preflight to match known mount-failure text.
 ///   We do not stream it because this is a one-shot probe with a trivial
 ///   command, and reads are bounded to a fixed max size.
-fn run_bwrap_in_child_capture_stderr(bwrap_args: crate::bwrap::BwrapArgs) -> String {
+fn run_bwrap_in_child_capture_stderr(
+    launcher: &BubblewrapLauncher,
+    mut bwrap_args: crate::bwrap::BwrapArgs,
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    sandbox_policy_cwd: &Path,
+) -> String {
+    crate::owned_metadata::protect_arguments(
+        file_system_sandbox_policy,
+        sandbox_policy_cwd,
+        &mut bwrap_args.args,
+    )
+    .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
     const MAX_PREFLIGHT_STDERR_BYTES: u64 = 64 * 1024;
     let crate::bwrap::BwrapArgs {
         args,
@@ -1337,7 +1369,7 @@ fn run_bwrap_in_child_capture_stderr(bwrap_args: crate::bwrap::BwrapArgs) -> Str
             close_fd_or_panic(write_fd, "close write end in bubblewrap child");
         }
 
-        exec_bwrap(args, preserved_files);
+        exec_bwrap(launcher, args, preserved_files);
     }
 
     let signal_forwarders = install_bwrap_signal_forwarders(pid);

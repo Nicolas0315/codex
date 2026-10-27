@@ -34,7 +34,7 @@ fn config_file(path: PathBuf) -> AbsolutePathBuf {
     path.abs()
 }
 
-fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
+async fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
     let cwd_dir = if cwd.is_dir() {
         cwd.to_path_buf()
     } else {
@@ -42,11 +42,13 @@ fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
             .expect("file cwd should have a parent directory")
             .to_path_buf()
     };
-    let project_root = cwd_dir
-        .ancestors()
-        .find(|ancestor| ancestor.join(".git").exists())
-        .unwrap_or(cwd_dir.as_path())
-        .to_path_buf();
+    // Build fixture layers with the same ownership-aware discovery as runtime.
+    let project_root = find_project_root(
+        LOCAL_FS.as_ref(),
+        &cwd_dir.as_path().abs(),
+        &[".git".to_string()],
+    )
+    .await;
 
     let mut layers = cwd_dir
         .ancestors()
@@ -54,7 +56,7 @@ fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
             if *done {
                 None
             } else {
-                if dir == project_root {
+                if dir == project_root.as_path() {
                     *done = true;
                 }
                 Some(dir.to_path_buf())
@@ -67,14 +69,15 @@ fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
         .into_iter()
         .filter_map(|dir| {
             let dot_codex = dir.join(REPO_ROOT_CONFIG_DIR_NAME);
-            dot_codex.is_dir().then(|| {
-                ConfigLayerEntry::new(
-                    ConfigLayerSource::Project {
-                        dot_codex_folder: dot_codex.abs(),
-                    },
-                    TomlValue::Table(toml::map::Map::new()),
-                )
-            })
+            (dot_codex.is_dir() && !codex_file_system::is_synthetic_metadata_directory(&dot_codex))
+                .then(|| {
+                    ConfigLayerEntry::new(
+                        ConfigLayerSource::Project {
+                            dot_codex_folder: dot_codex.abs(),
+                        },
+                        TomlValue::Table(toml::map::Map::new()),
+                    )
+                })
         })
         .collect()
 }
@@ -104,7 +107,7 @@ async fn make_config_for_cwd(codex_home: &TempDir, cwd: PathBuf) -> TestConfig {
             TomlValue::Table(toml::map::Map::new()),
         ),
     ];
-    layers.extend(project_layers_for_cwd(&cwd));
+    layers.extend(project_layers_for_cwd(&cwd).await);
 
     let cwd_abs = cwd.abs();
     TestConfig {
@@ -142,6 +145,29 @@ fn normalized(path: &Path) -> AbsolutePathBuf {
     canonicalize_path(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .abs()
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn skill_project_root_skips_owned_markers_and_preserves_real_custom_markers() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().abs();
+    fs::create_dir(root.join(".git")).expect("real git directory");
+    let cwd = root.join("nested");
+    fs::create_dir(&cwd).expect("nested directory");
+    let marker = cwd.join(".git");
+    codex_file_system::prepare_synthetic_metadata_directory(marker.as_path())
+        .expect("publish owned marker");
+    assert_eq!(
+        find_project_root(LOCAL_FS.as_ref(), &cwd, &[".git".to_string()]).await,
+        root
+    );
+    fs::create_dir(cwd.join("custom-marker")).expect("real custom marker");
+    assert_eq!(
+        find_project_root(LOCAL_FS.as_ref(), &cwd, &["custom-marker".to_string()]).await,
+        cwd
+    );
+    assert!(marker.is_dir());
 }
 
 #[tokio::test]

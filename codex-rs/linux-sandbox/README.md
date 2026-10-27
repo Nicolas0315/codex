@@ -7,14 +7,16 @@ This crate is responsible for producing:
   - the `codex-exec` CLI can check if its arg0 is `codex-linux-sandbox` and, if so, execute as if it were `codex-linux-sandbox`
   - this should also be true of the `codex` multitool CLI
 
-On Linux, Codex prefers the first `bwrap` found on `PATH`
-outside the current working directory whenever it is available. If `bwrap` is
+On Linux, Codex prefers the first trusted `bwrap` found on `PATH` outside the
+sandbox-policy workspace and filesystem-writable roots. Selection uses the trusted
+policy directory, including symlink aliases and replaceable parent directories,
+rather than the command's working directory. If a trusted `bwrap` is
 present but too old to support
 `--argv0`, the helper keeps using system bubblewrap and switches to a
-no-`--argv0` compatibility path for the inner re-exec. If `bwrap` is missing,
+no-`--argv0` compatibility path for the inner re-exec. If no trusted `bwrap` is found,
 the helper falls back to the bundled `codex-resources/bwrap` binary shipped
 with Codex.
-Codex also surfaces a startup warning when `bwrap` is missing so users know it
+Codex also surfaces a startup warning when no trusted `bwrap` is found so users know it
 is falling back to the bundled helper. Codex surfaces the same startup warning
 path when bubblewrap cannot create user namespaces. WSL2 follows the normal
 Linux bubblewrap path. WSL1 is not supported for bubblewrap sandboxing because
@@ -24,13 +26,18 @@ commands that would enter the bubblewrap path.
 **Current Behavior**
 - Legacy `SandboxPolicy` / `sandbox_mode` configs remain supported.
 - Bubblewrap is the default filesystem sandbox.
-- If `bwrap` is present on `PATH` outside the current working directory, the
-  helper uses it.
+- If `bwrap` is present on `PATH` outside the trusted workspace, writable roots,
+  and replaceable parents, the helper uses it. Lexical and canonical paths are
+  checked against the policy directory rather than the command directory.
+- For network-only profiles with unrestricted filesystem writes, non-root users
+  can use system installations whose canonical path and ancestors are root-owned
+  and not group- or world-writable. Root uses the bundled helper in this mode.
+  A policy workspace of `/` also falls back to the bundled helper.
 - If `bwrap` is present but too old to support `--argv0`, the helper uses a
   no-`--argv0` compatibility path for the inner re-exec.
-- If `bwrap` is missing, the helper falls back to the bundled
+- If no trusted `bwrap` is found, the helper falls back to the bundled
   `codex-resources/bwrap` path.
-- If `bwrap` is missing, Codex also surfaces a startup warning instead of
+- If no trusted `bwrap` is found, Codex also surfaces a startup warning instead of
   printing directly from the sandbox helper.
 - If bubblewrap cannot create user namespaces, Codex surfaces a startup warning
   instead of waiting for a runtime sandbox failure.

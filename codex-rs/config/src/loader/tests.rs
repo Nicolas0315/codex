@@ -70,10 +70,25 @@ impl ExecutorFileSystem for TestFileSystem {
 
     fn get_metadata<'a>(
         &'a self,
-        _path: &'a PathUri,
+        path: &'a PathUri,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
-        Box::pin(async move { unimplemented!("test filesystem only supports reads") })
+        Box::pin(async move {
+            let path = path.to_abs_path()?;
+            let metadata = tokio::fs::metadata(path.as_path()).await?;
+            let symlink_metadata = tokio::fs::symlink_metadata(path.as_path()).await?;
+            Ok(FileMetadata {
+                is_directory: metadata.is_dir(),
+                is_synthetic_directory: codex_file_system::is_synthetic_metadata_directory(
+                    path.as_path(),
+                ),
+                is_file: metadata.is_file(),
+                is_symlink: symlink_metadata.file_type().is_symlink(),
+                size: metadata.len(),
+                created_at_ms: 0,
+                modified_at_ms: 0,
+            })
+        })
     }
 
     fn read_directory<'a>(
@@ -102,6 +117,43 @@ impl ExecutorFileSystem for TestFileSystem {
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(async move { unimplemented!("test filesystem only supports reads") })
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn project_and_checkout_roots_skip_owned_markers_but_preserve_real_markers() {
+    let temp = tempdir().expect("tempdir");
+    let root = AbsolutePathBuf::try_from(temp.path()).expect("absolute root");
+    std::fs::create_dir(root.join(".git")).expect("real git directory");
+    let cwd = root.join("nested");
+    std::fs::create_dir(&cwd).expect("nested directory");
+    let marker = cwd.join(".git");
+    codex_file_system::prepare_synthetic_metadata_directory(marker.as_path())
+        .expect("publish owned marker");
+    assert_eq!(
+        find_git_checkout_root(&TestFileSystem, &cwd).await,
+        Some(root.clone())
+    );
+    assert_eq!(
+        codex_git_utils::get_git_repo_root_with_fs(&TestFileSystem, &cwd).await,
+        Some(root.clone())
+    );
+    assert_eq!(
+        find_project_root(&TestFileSystem, &cwd, &[".git".to_string()])
+            .await
+            .expect("root"),
+        root
+    );
+    // Custom root markers keep their presence-based semantics, including empty directories.
+    let custom = cwd.join("custom-marker");
+    std::fs::create_dir(&custom).expect("real custom marker");
+    assert_eq!(
+        find_project_root(&TestFileSystem, &cwd, &["custom-marker".to_string()])
+            .await
+            .expect("custom root"),
+        cwd
+    );
+    assert!(marker.is_dir());
 }
 
 #[tokio::test]
