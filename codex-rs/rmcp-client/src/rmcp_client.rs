@@ -25,9 +25,9 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResult;
 use rmcp::model::ClientNotification;
 use rmcp::model::ClientRequest;
-use rmcp::model::CreateElicitationRequestParams;
 use rmcp::model::CustomNotification;
 use rmcp::model::CustomRequest;
+use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitResult;
 use rmcp::model::ElicitationAction;
 use rmcp::model::Extensions;
@@ -251,7 +251,7 @@ fn remaining_operation_timeout(
     }
 }
 
-pub type Elicitation = CreateElicitationRequestParams;
+pub type Elicitation = ElicitRequestParams;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1188,6 +1188,10 @@ async fn create_oauth_transport_and_runtime(
 
     Ok((transport, runtime))
 }
+
+#[cfg(test)]
+#[path = "logging_client_handler_tests.rs"]
+mod logging_tests;
 
 #[cfg(test)]
 mod tests {

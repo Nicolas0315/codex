@@ -26,7 +26,7 @@ use codex_rmcp_client::ElicitationResponse;
 use codex_rmcp_client::SendElicitation;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
-use rmcp::model::CreateElicitationRequestParams;
+use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitationAction;
 use rmcp::model::RequestId;
 use tokio::sync::Mutex;
@@ -36,7 +36,7 @@ use tokio::sync::oneshot;
 pub struct ElicitationReviewRequest {
     pub server_name: String,
     pub request_id: RequestId,
-    pub elicitation: CreateElicitationRequestParams,
+    pub elicitation: ElicitRequestParams,
 }
 
 pub trait ElicitationReviewer: Send + Sync {
@@ -172,7 +172,7 @@ impl ElicitationRequestManager {
                 }
 
                 let request = match elicitation {
-                    CreateElicitationRequestParams::FormElicitationParams {
+                    ElicitRequestParams::FormElicitationParams {
                         meta,
                         message,
                         requested_schema,
@@ -185,7 +185,7 @@ impl ElicitationRequestManager {
                         requested_schema: serde_json::to_value(requested_schema)
                             .context("failed to serialize MCP elicitation schema")?,
                     },
-                    CreateElicitationRequestParams::UrlElicitationParams {
+                    ElicitRequestParams::UrlElicitationParams {
                         meta,
                         message,
                         url,
@@ -244,15 +244,15 @@ pub(crate) fn elicitation_is_rejected_by_policy(approval_policy: AskForApproval)
 
 type ResponderMap = HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>;
 
-fn can_auto_accept_elicitation(elicitation: &CreateElicitationRequestParams) -> bool {
+fn can_auto_accept_elicitation(elicitation: &ElicitRequestParams) -> bool {
     match elicitation {
-        CreateElicitationRequestParams::FormElicitationParams {
+        ElicitRequestParams::FormElicitationParams {
             requested_schema, ..
         } => {
             // Auto-accept confirm/approval elicitations without schema requirements.
             requested_schema.properties.is_empty()
         }
-        CreateElicitationRequestParams::UrlElicitationParams { .. } => false,
+        ElicitRequestParams::UrlElicitationParams { .. } => false,
         _ => false,
     }
 }
