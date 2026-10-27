@@ -555,6 +555,62 @@ fn intersecting_globs_use_one_filtered_directory_without_reopening_matching_reco
 }
 
 #[test]
+fn selected_proof_candidates_are_validated_before_entering_a_filtered_view() {
+    let root = fixture(Path::new("/var/tmp"));
+    let (name, source) = stage_authority(&File::open(&root).unwrap()).unwrap();
+    let source_path = root.join(OsString::from_vec(name.as_bytes().to_vec()));
+    let object = fixture(&root);
+    let directory = File::open(object).unwrap();
+    set_tag(&directory).unwrap();
+    let (key, bytes) = nonce_record(&directory).unwrap();
+    write_record(&source, &key, &bytes).unwrap();
+    let valid_name = OsString::from_vec(key.as_bytes().to_vec());
+    let wrong_hash = CString::new("0".repeat(64)).unwrap();
+    write_record(&source, &wrong_hash, &bytes).unwrap();
+    let link_name = OsString::from("1".repeat(64));
+    std::os::unix::fs::symlink(source_path.join(&valid_name), source_path.join(&link_name))
+        .unwrap();
+    let directory_name = OsString::from("2".repeat(64));
+    fs::create_dir(source_path.join(&directory_name)).unwrap();
+    let mut nonce_only = b"CSM2".to_vec();
+    nonce_only.extend_from_slice(&[7_u8; 32]);
+    let nonce_name = CString::new(format!("{:x}", Sha256::digest(&nonce_only))).unwrap();
+    nonce_only.extend_from_slice(&[0_u8; 16]);
+    write_record(&source, &nonce_name, &nonce_only).unwrap();
+    let names = vec![
+        OsString::from("format"),
+        valid_name.clone(),
+        OsString::from_vec(wrong_hash.as_bytes().to_vec()),
+        link_name.clone(),
+        directory_name.clone(),
+        OsString::from_vec(nonce_name.as_bytes().to_vec()),
+    ];
+    let view = views::filtered_view(&source, &names, views::ViewAccess::Readable).unwrap();
+    let mut actual = fs::read_dir(view)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = vec![OsString::from("format"), valid_name];
+    expected.sort();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        fs::read(source_path.join(OsString::from_vec(wrong_hash.as_bytes().to_vec()))).unwrap(),
+        bytes
+    );
+    assert!(
+        fs::symlink_metadata(source_path.join(link_name))
+            .unwrap()
+            .is_symlink()
+    );
+    assert!(source_path.join(directory_name).is_dir());
+    assert_eq!(
+        fs::read(source_path.join(OsString::from_vec(nonce_name.as_bytes().to_vec()))).unwrap(),
+        nonce_only
+    );
+}
+
+#[test]
 fn corrupted_filtered_cache_is_retained_and_rebuilt_as_nonauthoritative_data() {
     let root = fixture(Path::new("/var/tmp"));
     let (_, source) = stage_authority(&File::open(&root).unwrap()).unwrap();

@@ -121,6 +121,43 @@ fn a_codex_symlink_does_not_bypass_native_ancestor_permissions() {
 }
 
 #[test]
+fn an_existing_codex_directory_retains_user_files_during_initialization() {
+    let home = super::super::tests::fixture(Path::new("/var/tmp"));
+    let codex = home.join(".codex");
+    fs::create_dir(&codex).unwrap();
+    let user_file = codex.join("user-settings");
+    fs::write(&user_file, b"preserve user settings").unwrap();
+    let before = fs::metadata(&codex).unwrap();
+    open_home(&home, AuthorityMode::Initialize).unwrap();
+    assert_eq!(fs::metadata(&codex).unwrap().ino(), before.ino());
+    assert_eq!(fs::read(user_file).unwrap(), b"preserve user settings");
+}
+
+#[test]
+fn an_existing_codex_file_is_retained_when_initialization_fails() {
+    let home = super::super::tests::fixture(Path::new("/var/tmp"));
+    let codex = home.join(".codex");
+    fs::write(&codex, b"preserve user entry").unwrap();
+    let before = fs::metadata(&codex).unwrap();
+    assert!(open_home(&home, AuthorityMode::Initialize).is_err());
+    assert_eq!(fs::metadata(&codex).unwrap().ino(), before.ino());
+    assert_eq!(fs::read(codex).unwrap(), b"preserve user entry");
+}
+
+#[test]
+fn a_dangling_codex_symlink_is_retained_when_initialization_fails() {
+    let home = super::super::tests::fixture(Path::new("/var/tmp"));
+    let codex = home.join(".codex");
+    let missing = home.join("missing-user-target");
+    symlink(&missing, &codex).unwrap();
+    let before = fs::symlink_metadata(&codex).unwrap();
+    assert!(open_home(&home, AuthorityMode::Initialize).is_err());
+    assert_eq!(fs::symlink_metadata(&codex).unwrap().ino(), before.ino());
+    assert_eq!(fs::read_link(codex).unwrap(), missing);
+    assert!(!missing.exists());
+}
+
+#[test]
 fn migration_copies_only_path_free_legacy_native_records_and_preserves_sources() {
     let home = super::super::tests::fixture(Path::new("/var/tmp"));
     fs::create_dir(home.join(".codex")).unwrap();

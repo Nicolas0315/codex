@@ -11,7 +11,6 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::ReadDenyMatcher;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use std::ffi::CString;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
@@ -67,25 +66,15 @@ fn hide_private_storage(
     Ok(())
 }
 
-fn public_record_names(directory: &File) -> io::Result<Vec<OsString>> {
+fn public_record_candidates(directory: &File) -> io::Result<Vec<OsString>> {
     let mut records = Vec::new();
     for entry in std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
         let name = entry?.file_name();
         let bytes = name.as_bytes();
         if bytes == b"format" || (bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit)) {
-            let name_c =
-                CString::new(bytes).map_err(|_| invalid("invalid ownership record name"))?;
-            if bytes == b"format" {
-                read_bounded(open_at(
-                    directory,
-                    &name_c,
-                    libc::O_RDONLY,
-                    /*mode*/ 0,
-                )?)?;
-                records.push(name);
-            } else if registry::ownership_record(directory, &name_c)?.is_some() {
-                records.push(name);
-            }
+            // Selection only needs names. filtered_view validates the selected
+            // source records before hashing, reusing or publishing a projection.
+            records.push(name);
         }
     }
     Ok(records)
@@ -200,13 +189,12 @@ pub(super) fn protection_with_mounts(
                 .map_or(true, |path| intersects_denied_children(&path))
     };
     let writable_candidate = |path: &Path| {
-        mounts.writable(path)
+        writable_roots.iter().any(|root| {
+            path.starts_with(root.root.as_path()) || root.root.as_path().starts_with(path)
+        }) && mounts.writable(path)
             && !glob_matcher
                 .as_ref()
                 .is_some_and(|matcher| matcher.is_read_denied(path))
-            && writable_roots.iter().any(|root| {
-                path.starts_with(root.root.as_path()) || root.root.as_path().starts_with(path)
-            })
             && (policy.can_write_path_with_cwd(path, cwd)
                 || path
                     .parent()
@@ -253,7 +241,7 @@ pub(super) fn protection_with_mounts(
                     } else {
                         let names = match &public_names {
                             Some(names) => names,
-                            None => public_names.insert(public_record_names(directory)?),
+                            None => public_names.insert(public_record_candidates(directory)?),
                         };
                         let selected = names
                             .iter()
@@ -271,7 +259,7 @@ pub(super) fn protection_with_mounts(
                         ))
                     }
                 } else {
-                    let names = public_record_names(&registry)?;
+                    let names = public_record_candidates(&registry)?;
                     let selected = names
                         .into_iter()
                         .filter(|name| public_read_allowed(&alias.join(name)))
@@ -299,7 +287,7 @@ pub(super) fn protection_with_mounts(
                     } else {
                         let names = match &public_names {
                             Some(names) => names,
-                            None => public_names.insert(public_record_names(directory)?),
+                            None => public_names.insert(public_record_candidates(directory)?),
                         };
                         let selected = names
                             .iter()
@@ -416,7 +404,7 @@ pub(super) fn protection_with_mounts(
             }
             let names = match &records {
                 Some(names) => names,
-                None => records.insert(public_record_names(&open_directory(&authority)?)?),
+                None => records.insert(public_record_candidates(&open_directory(&authority)?)?),
             };
             let source = if !intersects_denies {
                 // The readable parent already grants every public child. Reuse

@@ -129,27 +129,37 @@ fn open_home(home: &Path, mode: AuthorityMode) -> io::Result<File> {
             "synthetic metadata home owner differs from effective user",
         ));
     }
-    let created_codex = if matches!(mode, AuthorityMode::Initialize) {
-        if unsafe {
-            libc::mkdirat(
-                home_directory.as_raw_fd(),
-                c".codex".as_ptr(),
-                /*mode*/ 0o700,
-            )
-        } == 0
+    let codex_path = home.join(".codex");
+    // An existing home may be mounted read-only even when its .codex symlink
+    // resolves to writable native storage. Do not attempt mkdir on that home.
+    let (codex, created_codex) = match codex_path.canonicalize() {
+        Ok(codex) => (codex, false),
+        Err(error)
+            if matches!(mode, AuthorityMode::Initialize)
+                && error.kind() == io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(&codex_path)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound) =>
         {
-            true
-        } else {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::AlreadyExists {
-                return Err(error);
-            }
-            false
+            let created = if unsafe {
+                libc::mkdirat(
+                    home_directory.as_raw_fd(),
+                    c".codex".as_ptr(),
+                    /*mode*/ 0o700,
+                )
+            } == 0
+            {
+                true
+            } else {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+                false
+            };
+            (codex_path.canonicalize()?, created)
         }
-    } else {
-        false
+        Err(error) => return Err(error),
     };
-    let codex = home.join(".codex").canonicalize()?;
     validate_native_chain(&codex)?;
     let codex_directory = open_directory(&codex)?;
     let registry = authority(&codex_directory, c"synthetic-metadata-v2", mode)?;
