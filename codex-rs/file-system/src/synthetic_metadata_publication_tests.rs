@@ -23,6 +23,29 @@ fn nested_publication_reuses_the_stage_protected_by_an_earlier_writer() {
 }
 
 #[test]
+fn completed_stage_reservations_do_not_block_independent_publications() {
+    let root = fixture(Path::new("/var/tmp"));
+    let registry_path = root.join("registry");
+    let registry = registry::open_path(&registry_path, AuthorityMode::Initialize).unwrap();
+    let workspace = root.join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let stage = staging_directory(&workspace, &MountTable::read().unwrap(), &registry).unwrap();
+    assert!(stage.is_dir());
+
+    // The caller keeps its registry open while publishing a pending object.
+    // A completed reservation must let another launcher reserve its own stage.
+    let other_launcher = open_directory(&registry_path).unwrap();
+    let acquired =
+        unsafe { libc::flock(other_launcher.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(
+        acquired,
+        0,
+        "reservation lock outlived stage preparation: {}",
+        io::Error::last_os_error()
+    );
+}
+
+#[test]
 fn publication_on_a_different_mount_uses_nonce_identity_and_local_staging() {
     if !Path::new("/dev/shm").is_dir() {
         return;

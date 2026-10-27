@@ -294,7 +294,15 @@ fn staging_directory(
     }
     // Serialize reservations against other trusted launchers. The index remains
     // private to the launcher; the command only needs path-free ownership data.
-    if unsafe { libc::flock(registry.as_raw_fd(), libc::LOCK_EX) } != 0 {
+    // An independent open file description releases the lock on every return,
+    // before the caller starts publishing objects through its registry handle.
+    let reservation = open_at(
+        registry,
+        c".",
+        libc::O_RDONLY | libc::O_DIRECTORY,
+        /*mode*/ 0,
+    )?;
+    if unsafe { libc::flock(reservation.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(io::Error::last_os_error());
     }
     let index = registry::authority(registry, registry::INDEX, AuthorityMode::Initialize)?;
